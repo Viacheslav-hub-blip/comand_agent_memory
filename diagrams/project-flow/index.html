@@ -1,0 +1,160 @@
+<!doctype html>
+<!-- Схема проекта от истории чата до командной памяти.
+Функции: selectRoute — подсветка варианта проверки; updateNavigation — текущий раздел.
+Страница автономна: внешние библиотеки и сетевые запросы не используются. -->
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>От чата до командной памяти</title>
+<style>
+:root{--paper:#f4f6fa;--surface:#fff;--ink:#182638;--muted:#4d6075;--rule:#d5dfea;--blue:#2159bd;--blue-light:#edf3ff;--green:#215e46;--green-light:#edf7f1;--amber:#765016;--amber-light:#fff8e9;--red:#8d3d38;--red-light:#fff3f1;--radius:9px}
+*{box-sizing:border-box}html{scroll-padding-top:26px}body{margin:0;background:var(--paper);color:var(--ink);font:18px/1.65 'Segoe UI',Arial,sans-serif}button{font:inherit}a{color:var(--blue)}
+:focus-visible{outline:3px solid #4276ce;outline-offset:4px}.skip-link{position:absolute;left:20px;top:-100px;z-index:10;background:white;padding:12px}.skip-link:focus{top:12px}
+.sidebar{position:fixed;inset:0 auto 0 0;width:252px;background:var(--surface);border-right:1px solid var(--rule);padding:30px 20px;overflow:auto}.brand{font-size:21px;font-weight:700;line-height:1.35;margin:0 0 8px}.sidebar p{font-size:14px;color:var(--muted);margin:0 0 24px}.sidebar nav{display:grid;gap:7px}.sidebar a{font-size:15px;text-decoration:none;color:var(--muted);padding:10px 12px;border-radius:6px;border-left:3px solid transparent}.sidebar a:hover{background:var(--paper);color:var(--ink)}.sidebar a[aria-current=true]{color:var(--blue);background:var(--blue-light);border-left-color:var(--blue);font-weight:600}.nav-divider{border-top:1px solid var(--rule);margin:14px 0 5px}
+main{max-width:1430px;margin-left:252px;padding:52px 52px 80px}.eyebrow{font-size:13px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:0 0 10px}h1{font-size:clamp(34px,4vw,52px);line-height:1.15;letter-spacing:-.035em;margin:0 0 20px;max-width:850px}header>.intro{font-size:21px;color:var(--muted);max-width:850px;margin:0 0 24px}
+.legend{display:flex;gap:10px;flex-wrap:wrap;margin:22px 0}.badge{display:inline-block;font-size:13px;line-height:1.4;font-weight:650;padding:6px 11px;border:1px solid var(--rule);border-radius:5px;background:var(--paper);color:var(--muted)}.badge.llm{color:var(--blue);background:var(--blue-light);border-color:#c0d2f0}.badge.data{color:var(--green);background:var(--green-light);border-color:#c0d9ca}.badge.plan{color:var(--amber);background:var(--amber-light);border:1px dashed #b58c4c}.badge.optional{color:var(--blue);background:white;border-style:dashed}
+.overview{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:15px;margin:25px 0 32px}.overview span{padding:7px 11px;background:white;border:1px solid var(--rule);border-radius:5px}.overview i{font-style:normal;color:var(--muted)}
+.notice{padding:18px 22px;border-left:4px solid var(--blue);background:var(--blue-light);font-size:16px;margin:24px 0}.notice strong{display:block;margin-bottom:4px}.notice.plan{border-color:#b58c4c;background:var(--amber-light)}
+.stage{margin:56px 0 0;scroll-margin-top:28px}.stage-heading{display:flex;align-items:flex-start;gap:18px;margin-bottom:23px}.step-number{flex:0 0 56px;width:56px;height:56px;border:1px solid var(--rule);background:white;border-radius:8px;display:grid;place-items:center;font-size:22px;font-weight:700;color:var(--blue)}h2{font-size:30px;line-height:1.25;letter-spacing:-.02em;margin:2px 0 8px}.stage-heading p{margin:0;color:var(--muted);font-size:17px}.stage-body{margin-left:74px}h3{font-size:23px;line-height:1.3;margin:13px 0 14px}h4{font-size:19px;margin:0 0 10px}p{margin:12px 0}ul{padding-left:23px;margin:12px 0}li{margin:6px 0}
+.card{border:1px solid var(--rule);border-radius:var(--radius);background:var(--surface);padding:26px 28px;min-width:0}.card>p:last-child{margin-bottom:0}.card .small{font-size:16px;color:var(--muted)}.cards{display:grid;grid-template-columns:1fr 1fr;gap:20px}.cards .card{height:100%}.store{background:var(--green-light);border-color:#c0d9ca}.store h3{color:var(--green)}.label{display:block;font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:6px}.port{padding-top:17px;margin-top:19px;border-top:1px solid var(--rule);font-size:17px}.port p{margin:3px 0}.incoming{padding:17px 21px;margin-bottom:20px;border:1px solid var(--rule);border-radius:6px;background:#eaf0f6;font-size:17px}.handoff{position:relative;display:flex;align-items:center;gap:12px;justify-content:center;padding:20px 0;color:var(--muted);font-size:15px;line-height:1.4;text-align:center}.handoff svg{width:20px;height:24px;flex-shrink:0}.handoff svg path{stroke:#64758b;stroke-width:1.7;fill:none}.stage-next{margin:28px 0 -26px 74px;border-left:2px solid var(--rule);height:34px;position:relative}.stage-next:after{content:'';position:absolute;left:-5px;bottom:0;width:8px;height:8px;border-right:2px solid #64758b;border-bottom:2px solid #64758b;transform:rotate(45deg)}
+.outcomes{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:20px}.outcome{border:1px solid var(--rule);border-radius:7px;padding:18px 20px;font-size:17px;background:white}.outcome.accept{background:var(--green-light);border-color:#c0d9ca}.outcome.reject{background:var(--red-light);border-color:#e1c5c1}.outcome strong{display:block;margin-bottom:5px}.separator{margin:70px 0 0;border:0;border-top:2px solid var(--rule)}
+.route-buttons{display:flex;gap:9px;flex-wrap:wrap;margin:15px 0 20px}.route-buttons button{background:white;border:1px solid var(--rule);padding:10px 14px;border-radius:6px;min-height:44px;font-size:15px;cursor:pointer}.route-buttons button:hover{background:var(--blue-light)}.route-buttons button[aria-pressed=true]{color:white;background:var(--blue);border-color:var(--blue)}.routes{display:grid;gap:16px}.route{background:white;border:1px solid var(--rule);border-left:4px solid #a1adbb;border-radius:7px;padding:22px 24px}.route.selected{border-color:var(--blue);border-left-width:7px;background:var(--blue-light)}.route h3{font-size:21px;margin:0 0 9px}.route p{font-size:17px;margin:8px 0}.route .route-result{border-top:1px solid var(--rule);padding-top:12px;margin-top:14px}.trace{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:15px;margin:13px 0}.trace span{background:var(--paper);padding:5px 10px;border-radius:4px}.trace b{font-weight:400;color:var(--muted)}#route-status{font-size:16px;color:var(--muted);min-height:28px;margin:0 0 15px}.branch-box{padding:20px 24px;background:var(--paper);border-radius:7px;margin:20px 0}.branch-box p{font-size:17px;margin:7px 0}.branch-box strong{color:var(--ink)}
+.memory-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 25px;margin:16px 0 0}.memory-type{padding:16px 0;border-top:1px solid var(--rule)}.memory-type p{font-size:16px;margin:7px 0 0;color:var(--muted)}.memory-type h4{margin:0}.plan-area{border:1px dashed #b58c4c;padding:28px;background:var(--amber-light);border-radius:var(--radius)}.states{display:grid;gap:14px;margin-top:20px}.state{padding:18px 20px;border:1px solid #dac8a6;background:#fffdf8;border-radius:6px}.state h3{font-size:21px;margin:0 0 8px}.state p{font-size:17px;margin:0}.state .label{color:var(--amber)}.number-list{list-style:none;padding:0;counter-reset:reports}.number-list li{counter-increment:reports;padding:14px 0 14px 44px;border-top:1px solid var(--rule);position:relative;font-size:17px}.number-list li:before{content:counter(reports);position:absolute;left:0;top:14px;font-weight:700;color:var(--muted)}footer{margin:65px 0 0 74px;border-top:1px solid var(--rule);padding-top:22px;font-size:15px;color:var(--muted)}
+@media(min-width:1600px){main{padding-left:70px;padding-right:70px}.stage-body{max-width:1000px}}
+@media(max-width:1100px){main{padding:36px 26px 65px;margin-left:220px}.sidebar{width:220px;padding:25px 14px}.stage-body{margin-left:0}.stage-next{margin-left:27px}.cards{gap:14px}.card{padding:22px}.memory-grid{gap:0 20px}footer{margin-left:0}}
+@media(max-width:760px){.sidebar{position:static;width:auto;padding:22px;border-right:0;border-bottom:1px solid var(--rule)}.sidebar nav{display:flex;flex-wrap:wrap;gap:5px}.sidebar a{padding:8px 10px;font-size:14px}.sidebar .nav-divider{display:none}.sidebar p{margin-bottom:15px}.sidebar .brand{font-size:19px}main{margin:0;padding:30px 18px 50px}.intro{font-size:19px!important}.stage{margin-top:40px}.stage-heading{gap:13px}.step-number{flex-basis:46px;width:46px;height:46px;font-size:19px}h2{font-size:26px}h3{font-size:22px}.cards,.outcomes,.memory-grid{grid-template-columns:1fr}.card{padding:22px}.notice{padding:16px 18px}.stage-next{margin-left:22px}.plan-area{padding:21px}.overview{font-size:14px}footer{margin-top:45px}}
+@media print{.sidebar,.route-buttons,.skip-link{display:none}main{margin:0;max-width:none;padding:0}body{font-size:13pt;background:white}.stage{break-inside:avoid;margin-top:26px}.card,.route,.plan-area{break-inside:avoid}.stage-body{margin-left:0}.stage-next{height:18px}.notice{background:white}h1{font-size:30pt}h2{font-size:21pt}h3{font-size:17pt}footer{margin-left:0}}
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">К схеме</a>
+<aside class="sidebar">
+<p class="brand">От чата<br>до командной памяти</p>
+<p>Полная логика проекта.<br>Движение сверху вниз.</p>
+<nav aria-label="Этапы проекта">
+<a href="#history" aria-current="true">01 · История диалога</a>
+<a href="#analysis">02 · Два анализа</a>
+<a href="#consolidation">03 · Консолидация</a>
+<a href="#review">04 · Ревью памяти</a>
+<a href="#evaluation">05 · Проверка задачей</a>
+<a href="#personal">06 · Личная память</a>
+<a href="#team">07 · Командная память</a>
+<span class="nav-divider" aria-hidden="true"></span>
+<a href="#reports">Отчётность каждого этапа</a>
+<a href="#planned">Что ещё запланировано</a>
+</nav>
+</aside>
+<main id="main">
+<header>
+<p class="eyebrow">Архитектура проекта</p>
+<h1>Опыт из диалогов становится памятью</h1>
+<p class="intro">Система извлекает сведения, объединяет их с памятью, проверяет предложения и сохраняет результат для следующих задач.</p>
+<div class="legend" aria-label="Обозначения"><span class="badge llm">LLM · смысл и решения</span><span class="badge">Код · запуск и файлы</span><span class="badge data">Память · сохранённые сведения</span><span class="badge plan">План · ещё не реализовано</span></div>
+<div class="overview" aria-label="Общий маршрут"><span>Чат</span><i aria-hidden="true">→</i><span>Анализ</span><i aria-hidden="true">→</i><span>Консолидация</span><i aria-hidden="true">→</i><span>Проверка</span><i aria-hidden="true">→</i><span>Личная память</span><i aria-hidden="true">→</i><span>Командная память</span></div>
+<div class="notice"><strong>На этой странице показан текущий порядок работы.</strong>Командный этап при общем запуске следует за принятием личной памяти. Будущие подтверждения и хранилище противоречий показаны отдельно внизу.</div>
+</header>
+
+<section id="history" class="stage" aria-labelledby="history-title">
+<div class="stage-heading"><span class="step-number" aria-hidden="true">01</span><div><h2 id="history-title">Сохранить историю работы</h2><p>Начальная единица обработки — один диалог.</p></div></div>
+<div class="stage-body"><article class="card"><span class="badge">Код · адаптер источника</span><h3>Прочитать реплики и работу инструментов</h3><p>В историю входят сообщения пользователя, ответы агента, вызовы инструментов, их аргументы и результаты. Содержимое прочитанных файлов используется, когда оно присутствует в журнале.</p><p class="small">Сейчас доступны логи Codex и история нашего агента в SQLite. Адаптеры Claude Code и Phoenix запланированы.</p><div class="port"><span class="label">Результат</span><p>История одного диалога для анализа. Исходный журнал остаётся без изменений.</p></div></article></div>
+<div class="stage-next" aria-hidden="true"></div>
+</section>
+
+<section id="analysis" class="stage" aria-labelledby="analysis-title">
+<div class="stage-heading"><span class="step-number" aria-hidden="true">02</span><div><h2 id="analysis-title">Два анализа одной истории</h2><p>Каждый анализатор получает исходную историю и свою инструкцию.</p></div></div>
+<div class="stage-body"><div class="incoming"><strong>Общий вход:</strong> полная история одного диалога.</div>
+<div class="cards"><article class="card"><span class="badge llm">LLM · анализ контекста</span><h3>Что стоит помнить о работе и данных</h3><ul><li>Предпочтения пользователя для типов задач.</li><li>Заданные им правила дальнейшей работы.</li><li>Личный контекст и окружение.</li><li>Определения, сообщённые пользователем.</li></ul><div class="port"><span class="label">Результат</span><p>Отчёт о контексте.</p></div></article>
+<article class="card"><span class="badge llm">LLM · анализ решений</span><h3>Какой опыт можно применить снова</h3><ul><li>Cases: ситуация, причина проблемы, приём и условия применения.</li><li>Skills: выполненные процедуры решения типов задач.</li><li>Ограничения и исправления неудачных подходов.</li></ul><div class="port"><span class="label">Результат</span><p>Отчёт об опыте и процедурах.</p></div></article></div>
+<div class="handoff"><svg viewBox="0 0 20 24" aria-hidden="true"><path d="M10 1v19m-6-6 6 6 6-6"/></svg><span>Два отчёта на каждый диалог</span></div>
+<article class="card store"><span class="badge data">Материалы пользователя</span><h3>Собрать отчёты выбранных диалогов</h3><p>Код передаёт их полные тексты. Он не ищет знания по заголовкам и не делит Markdown на смысловые части. Отбор по назначению выполняют модели.</p></article></div>
+<div class="stage-next" aria-hidden="true"></div>
+</section>
+
+<section id="consolidation" class="stage" aria-labelledby="consolidation-title">
+<div class="stage-heading"><span class="step-number" aria-hidden="true">03</span><div><h2 id="consolidation-title">Собрать предложение личной памяти</h2><p>Два консолидатора последовательно меняют одну копию.</p></div></div>
+<div class="stage-body"><article class="card"><span class="badge">Код · подготовка копии</span><h3>Начать с существующей памяти</h3><p>Код блокирует конкурирующую запись, сохраняет состояние до изменений и создаёт копию. Консолидаторы работают с копией; действующая память в этот момент не меняется.</p></article>
+<div class="handoff"><svg viewBox="0 0 20 24" aria-hidden="true"><path d="M10 1v19m-6-6 6 6 6-6"/></svg><span>Сначала личные сведения</span></div>
+<article class="card"><span class="badge llm">LLM · личный консолидатор</span><h3>Правила, предпочтения и контекст</h3><span class="label">Вход</span><p>Отчёты о контексте и существующие личные сведения.</p><p>Модель объединяет формулировки, учитывает исправления пользователя и отделяет постоянные потребности от условий одного поручения.</p><div class="port"><span class="label">Результат в копии</span><p>Обновлённые правила работы, предпочтения и личная wiki.</p></div></article>
+<div class="handoff"><svg viewBox="0 0 20 24" aria-hidden="true"><path d="M10 1v19m-6-6 6 6 6-6"/></svg><span>Затем знания — в той же копии</span></div>
+<article class="card"><span class="badge llm">LLM · консолидатор знаний</span><h3>Определения, cases и skills</h3><span class="label">Вход</span><p>Оба вида отчётов и существующий каталог знаний пользователя.</p><p>Модель дополняет материалы по темам, объединяет повторяющийся опыт и сохраняет условия применения. Новый диалог сам по себе не требует нового case или skill.</p><div class="port"><span class="label">Результат в копии</span><p>Предметные статьи, обобщаемые cases, процедуры и индекс знаний.</p></div></article>
+<div class="notice"><strong>Одна предложенная версия памяти</strong>Правила, предпочтения, контекст и знания рассматриваются вместе на следующем этапе.</div></div>
+<div class="stage-next" aria-hidden="true"></div>
+</section>
+
+<section id="review" class="stage" aria-labelledby="review-title">
+<div class="stage-heading"><span class="step-number" aria-hidden="true">04</span><div><h2 id="review-title">Проверить и исправить предложение</h2><p>Ревью происходит до переноса в действующую память.</p></div></div>
+<div class="stage-body"><article class="card"><span class="badge llm">LLM · ревьюер с правом исправления</span><h3>Проверить полезность и применимость сведений</h3><span class="label">Вход</span><p>Исходные отчёты, прежняя память, предложенная копия и инструкции размещения.</p><ul><li>Убрать очевидное, домыслы и разовые условия в постоянных правилах.</li><li>Проверить обобщение предпочтений и содержания cases.</li><li>Убрать определения, которые пользователь не сообщал и не подтверждал.</li><li>Объединить смысловые дубли между файлами.</li><li>Отличить короткий опыт от полной процедуры skill.</li><li>Сохранить условия, формулы и ограничения; обновить ссылки.</li></ul><div class="port"><span class="label">Результат</span><p>Исправленная копия и решение. Сохраняются версии до консолидации, до ревью и после него.</p></div></article>
+<div class="outcomes"><div class="outcome accept"><strong>Принято</strong>Итоговая копия может перейти к проверке задачей или принятию по ревью.</div><div class="outcome reject"><strong>Остались проблемы или произошёл сбой</strong>Переноса нет. Прежняя память остаётся действующей, материалы проверки сохраняются.</div></div></div>
+<div class="stage-next" aria-hidden="true"></div>
+</section>
+
+<section id="evaluation" class="stage" aria-labelledby="evaluation-title">
+<div class="stage-heading"><span class="step-number" aria-hidden="true">05</span><div><h2 id="evaluation-title">Решить, нужен ли прогон задачи</h2><p>Эта проверка включается отдельным флагом после принятого ревью.</p></div></div>
+<div class="stage-body"><article class="card"><span class="badge llm">LLM · оценка возможности и затрат</span><h3>Сначала оценка — затем выполнение</h3><p>Модель проверяет запрос, входные данные, воспроизводимость окружения и наличие прежнего результата. Затраты оценивает по исходной истории и измерениям: времени, токенам, вызовам и объёмам данных.</p><p>Дорогой запрос или выгрузка для такой оценки не запускаются. Отсутствующие измерения не заменяются нулями. Числовых порогов в коде нет.</p></article>
+<p class="small">Выберите маршрут для подсветки. Это просмотр схемы; кнопки ничего не запускают.</p>
+<div class="route-buttons" role="group" aria-label="Маршрут проверки"><button type="button" data-route-button="all" aria-pressed="true">Все варианты</button><button type="button" data-route-button="off" aria-pressed="false">Проверка выключена</button><button type="button" data-route-button="skip" aria-pressed="false">Недостаточно данных / дорого</button><button type="button" data-route-button="run" aria-pressed="false">Можно повторить</button></div>
+<p id="route-status" role="status">Показаны все три маршрута принятия решения.</p>
+<div class="routes">
+<article class="route" data-route="off"><h3>А. Проверка выключена</h3><p>Оценка затрат и выполнение задачи не вызываются.</p><p class="route-result"><strong>Основание принятия памяти:</strong> успешное ревью. В отчёте указано, что проверка задачей не запрашивалась.</p></article>
+<article class="route" data-route="skip"><h3>Б. Оценка выбрала skip</h3><p>Не хватает контекста, условия нельзя воспроизвести или ожидаемые затраты слишком велики либо неясны. Например, отсутствует снимок базы, а исходная выгрузка занимала часы.</p><p class="route-result"><strong>Основание принятия памяти:</strong> успешное ревью. Прогон пропущен с объяснением; это не успешное выполнение задачи.</p></article>
+<article class="route" data-route="run"><h3>В. Оценка выбрала run</h3><p>Решающий агент один раз выполняет задачу с новой памятью в подготовленной копии. Он получает запрос и входные данные. Прежний ответ и итоговые файлы передаются только оценщику.</p><div class="trace" aria-label="Порядок прогона"><span>Один запуск агента</span><b aria-hidden="true">→</b><span>Ответ, файлы и измерения</span><b aria-hidden="true">→</b><span>LLM: сравнение</span></div><p>Оценщик сначала сравнивает выполнение требований, качество и полноту, затем доступные затраты. Это сравнение с сохранённым прежним выполнением, а не два новых запуска.</p><div class="branch-box"><p><strong>candidate:</strong> предложенная память может быть принята.</p><p><strong>current или inconclusive:</strong> предложенная память не переносится.</p><p><strong>Сбой оценки или выполнения:</strong> перенос останавливается.</p></div></article>
+</div></div>
+<div class="stage-next" aria-hidden="true"></div>
+</section>
+
+<section id="personal" class="stage" aria-labelledby="personal-title">
+<div class="stage-heading"><span class="step-number" aria-hidden="true">06</span><div><h2 id="personal-title">Принять личную память</h2><p>Сохраняется именно та версия, которая прошла предусмотренную проверку.</p></div></div>
+<div class="stage-body"><article class="card store"><span class="badge">Код · перенос принятой версии</span><h3>Обновить память пользователя</h3><p>Код сверяет снимки и действующую память, сохраняет резервную копию и переносит изменения. При обычной ошибке переноса восстанавливает прежние файлы.</p><div class="memory-grid"><div class="memory-type"><h4>Правила работы</h4><p>Ограничения и соглашения, заданные пользователем для дальнейших задач.</p></div><div class="memory-type"><h4>Предпочтения</h4><p>Как пользователю удобно работать и получать результат.</p></div><div class="memory-type"><h4>Личный контекст</h4><p>Пользователь, его проекты, окружение и нужные для продолжения работы сведения.</p></div><div class="memory-type"><h4>Предметные определения</h4><p>Сообщённые пользователем термины, формулы и правила с условиями применения.</p></div><div class="memory-type"><h4>Cases</h4><p>Опыт, который помогает распознать ситуацию и выбрать подход.</p></div><div class="memory-type"><h4>Skills</h4><p>Процедуры, позволяющие выполнить задачи соответствующего типа.</p></div></div></article>
+<div class="notice"><strong>Использование в следующей задаче</strong>Наш агент подключает личные инструкции, индексы и skills. История следующей задачи затем может снова пройти анализ.</div></div>
+<div class="stage-next" aria-hidden="true"></div>
+</section>
+
+<section id="team" class="stage" aria-labelledby="team-title">
+<div class="stage-heading"><span class="step-number" aria-hidden="true">07</span><div><h2 id="team-title">Обновить командную память</h2><p>Этот этап уже можно запускать. При общем запуске он следует за принятием личного результата.</p></div></div>
+<div class="stage-body"><div class="incoming"><strong>Текущий вход:</strong> выбранный пакет отчётов анализа — контекст и решения — плюс существующая командная память.</div>
+<article class="card"><span class="badge">Код · отдельная копия общего каталога</span><h3>Подготовить командное предложение</h3><p>Сохраняется прежнее состояние общего каталога и создаётся копия для изменений.</p></article>
+<div class="handoff"><svg viewBox="0 0 20 24" aria-hidden="true"><path d="M10 1v19m-6-6 6 6 6-6"/></svg><span>Объединение знаний</span></div>
+<article class="card"><span class="badge llm">LLM · консолидатор знаний</span><h3>Сопоставить с существующими материалами</h3><p>Дополняет определения, обобщаемые cases и skills, объединяет дубли, сохраняет условия и убирает личные сведения и пути окружения автора.</p></article>
+<div class="handoff"><svg viewBox="0 0 20 24" aria-hidden="true"><path d="M10 1v19m-6-6 6 6 6-6"/></svg><span>Проверка всей командной копии</span></div>
+<article class="card"><span class="badge llm">LLM · ревьюер</span><h3>Исправить и принять либо отклонить</h3><p>Проверяет содержание, обобщение, дубли и процедуры. При отказе общий каталог не меняется. При принятии код переносит исправленную версию.</p></article>
+<div class="handoff"><svg viewBox="0 0 20 24" aria-hidden="true"><path d="M10 1v19m-6-6 6 6 6-6"/></svg><span>После принятого ревью</span></div>
+<article class="card store"><span class="badge data">Командная память</span><h3>Предметная wiki · Cases · Skills</h3><p>Общий каталог содержит знания и способы решения задач. Личные правила, предпочтения и контекст пользователя остаются в его области.</p></article>
+<div class="notice"><strong>Граница текущей реализации</strong>Командный консолидатор сейчас повторно читает отчёты анализа. Автоматическая передача принятых личных знаний вместе со статусом проверки ещё не подключена. Сам общий каталог пока не подключается автоматически агентам всех пользователей.</div></div>
+</section>
+
+<hr class="separator">
+<section id="reports" class="stage" aria-labelledby="reports-title">
+<div class="stage-heading"><div><p class="eyebrow">На протяжении обработки</p><h2 id="reports-title">Как пользователь видит, что произошло</h2><p>Отчёты сопровождают основной маршрут и обновляются по ходу работы.</p></div></div>
+<div class="stage-body"><article class="card"><span class="badge">Код · отчёты и снимки</span><h3>Запись сразу после каждого этапа</h3><ol class="number-list"><li><strong>Входные извлечения.</strong> Ссылки на полные результаты анализа.</li><li><strong>Каждый консолидатор.</strong> Что добавлено, уточнено, объединено и удалено; какие файлы изменились.</li><li><strong>Ревью.</strong> Какие ошибки исправлены и остались ли нерешённые вопросы.</li><li><strong>Проверка задачей.</strong> Оценка контекста и затрат, решение о запуске, результат сравнения или причина отсутствия выполнения.</li><li><strong>Принятие памяти.</strong> Что принято, куда сохранено либо почему перенос не состоялся.</li></ol><div class="port"><span class="label">Доступно для разбора</span><p>Общий итог, отдельные отчёты, различия файлов, снимки памяти, промпты, журналы и измерения. При сбое следующего этапа уже сохранённые отчёты остаются.</p></div></article></div>
+</section>
+
+<section id="planned" class="stage" aria-labelledby="planned-title">
+<div class="stage-heading"><div><p class="eyebrow">Следующий этап развития</p><h2 id="planned-title">Подтверждения и противоречия команды</h2><p>Эта логика пока не реализована.</p></div></div>
+<div class="stage-body"><div class="plan-area"><span class="badge plan">План</span><h3>Передавать принятые личные знания</h3><p>В командную обработку поступают определения, cases и skills вместе со статусом проверки. Реестр отличает новые диалоги от повторной обработки прежних.</p><div class="states"><article class="state"><span class="label">Первое подтверждение</span><h3>Промежуточное хранение</h3><p>Сведение встречается в одном диалоге. Оно ожидает подтверждения и ещё не применяется как командное знание.</p></article><article class="state"><span class="label">Подтверждение в другом диалоге</span><h3>Действующая командная память</h3><p>Повторение у того же или другого пользователя может подтвердить знание. Повторная обработка одного диалога подтверждений не добавляет. Различия условий сопоставляются отдельно.</p></article><article class="state"><span class="label">Противоречие при одинаковых условиях</span><h3>Хранение спорных вариантов</h3><p>Оба варианта сохраняются для дальнейшего рассмотрения. Спорное знание снимается с применения. Новые диалоги могут дать сведения для разрешения противоречия.</p></article></div><div class="port"><span class="label">Подключение пользователям — тоже план</span><p>Агенты получают действующие командные знания. Неподтверждённые и спорные сведения не подаются как установленные инструкции.</p></div></div></div>
+</section>
+
+<footer><p><strong>Разделение ответственности:</strong> LLM отбирают, обобщают, сопоставляют и оценивают смысл. Код читает источники, запускает этапы, создаёт копии, записывает отчёты и переносит принятую версию.</p><p>Страница показывает архитектуру. Она не запускает анализ, консолидацию или задачи.</p></footer>
+</main>
+<script>
+'use strict';
+/** Принимает название маршрута; подсвечивает его и обновляет пояснение, возвращает undefined. */
+function selectRoute(name){
+ const descriptions={all:'Показаны все три маршрута принятия решения.',off:'Проверка выключена: принятие памяти основано на успешном ревью.',skip:'Прогон пропущен по оценке контекста и затрат: причина записывается, память принимается по ревью.',run:'Один прогон и сравнение: перенос разрешается только при выборе candidate.'};
+ document.querySelectorAll('[data-route-button]').forEach(button=>button.setAttribute('aria-pressed',String(button.dataset.routeButton===name)));
+ document.querySelectorAll('[data-route]').forEach(panel=>panel.classList.toggle('selected',panel.dataset.route===name));
+ document.getElementById('route-status').textContent=descriptions[name];
+}
+/** Принимает наблюдения разделов; отмечает последний достигнутый раздел в навигации, возвращает undefined. */
+function updateNavigation(){
+ const sections=Array.from(document.querySelectorAll('main section[id]'));
+ const current=sections.filter(section=>section.getBoundingClientRect().top<=160).at(-1)||sections[0];
+ document.querySelectorAll('.sidebar nav a').forEach(link=>link.setAttribute('aria-current',String(link.getAttribute('href')==='#'+current.id)));
+}
+document.querySelectorAll('[data-route-button]').forEach(button=>button.addEventListener('click',()=>selectRoute(button.dataset.routeButton)));
+let scheduled=false;
+window.addEventListener('scroll',()=>{if(!scheduled){scheduled=true;window.requestAnimationFrame(()=>{updateNavigation();scheduled=false;});}},{passive:true});
+updateNavigation();
+</script>
+</body>
+</html>
