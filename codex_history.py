@@ -33,10 +33,10 @@ def project_name(cwd: str) -> str:
     return (PureWindowsPath(cwd).name if '\\' in cwd else Path(cwd).name).casefold()
 
 
-def list_sessions(home: Path, projects: list[str], limit: int = 2) -> list[dict]:
+def list_sessions(home: Path, projects: list[str], limit: int | None = 2) -> list[dict]:
     """Читает state_5.sqlite только для чтения; возвращает последние limit чатов каждого проекта.
 
-    Вход: каталог Codex, имена проектов, число диалогов на проект.
+    Вход: каталог Codex, имена проектов, число диалогов на проект; None — все.
     Выход: метаданные и существующие пути JSONL или JSONL.zst.
     Если проект либо файл не найден, вызывает исключение вместо пропуска.
     """

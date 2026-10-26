@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from replay_codex import run_codex_replay
+from replay_codex import build_replay_prompt, run_codex_replay
 
 
 class CodexReplayTests(unittest.TestCase):
@@ -66,6 +66,16 @@ class CodexReplayTests(unittest.TestCase):
             self.assertEqual(metrics["state"], "failed")
             self.assertIsNone(metrics["usage"])
             self.assertFalse(metrics["usage_complete"])
+
+    def test_baseline_prompt_excludes_memory(self):
+        """Без входов проверяет baseline без упоминания и загрузки памяти; возвращает None."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            request = root / "request.md"
+            request.write_text("Задача", encoding="utf-8")
+            prompt = build_replay_prompt(root, request, use_memory=False)
+        self.assertNotIn("Сначала прочитай", prompt)
+        self.assertIn("не должны использоваться", prompt)
 
 
 if __name__ == "__main__":

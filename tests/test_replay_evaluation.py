@@ -2,22 +2,16 @@
 
 Вход: временные сценарии и ответы процессов. Выход: unittest без сетевых запросов.
 Класс ReplayEvaluationTests: setUp, tearDown — файлы; prepare, review, worker,
-judge — имитация границ; execute — полный порядок; test_candidate_publishes,
+judge, dialogue — имитация границ; execute — полный порядок; test_candidate_publishes,
 test_current_preserves_memory, test_inconclusive_preserves_memory,
 test_failed_worker_preserves_memory, test_invalid_judge_preserves_memory,
 test_disabled_flag_does_not_run, test_review_rejection_does_not_run,
 test_replay_memory_change_is_not_published, test_reference_is_not_in_workspace,
 test_loader_rejects_overlapping_inputs, test_loader_requires_reference_answer,
 test_cli_accepts_missing_scenario — сценарии принятия и отказа.
-assess — имитация оценки возможности; test_skip_publishes_without_worker,
-test_missing_scenario_can_skip, test_assessment_failure_preserves_memory,
-test_incomplete_context_is_available_to_assessor, test_assessor_reads_saved_evidence,
-test_invalid_assessment_protocol, test_skip_preserves_expensive_measurements — оценка и пропуск.
-test_run_without_scenario_is_not_published — отказ при разрешении без сценария.
-test_structured_assessment_is_reported — объяснения JSON без жёсткого шаблона текста.
-test_reviewed_memory_reaches_replay — прогон после исправлений ревьюера.
-Класс ReplayMetricsTests: test_nested_usage_and_calls — callbacks и токены.
-test_force_replay_bypasses_assessment — обязательный прогон без оценки пропуска.
+check_replay_data проверяется отсутствующим сценарием, отсутствием реплик и ошибкой чтения.
+Класс ReplayMetricsTests проверяет callbacks и токены.
+Прямые тесты assess_replay сохранены для прежней отдельной методики оценки стоимости.
 """
 import importlib.util
 import json
@@ -53,7 +47,7 @@ class ReplayEvaluationTests(unittest.TestCase):
         (self.reference / "answer.md").write_bytes(b"old answer")
         self.scenario_path = self.root / "scenario.json"
         self.scenario_path.write_text(json.dumps({
-            "request": "Реши задачу и запиши output.txt", "inputs": "inputs", "reference": "reference",
+            "request": "Реши задачу и запиши output.txt", "messages": ["Реши задачу и запиши output.txt"], "inputs": "inputs", "reference": "reference",
         }), encoding="utf-8")
         self.scenario = replay.load_replay_scenario(self.scenario_path)
         self.choice = "candidate"
@@ -64,15 +58,19 @@ class ReplayEvaluationTests(unittest.TestCase):
         self.reject_review = False
         self.mutate_memory = False
         self.reviewed_memory = None
-        self.assessment_choice = "run"
-        self.assessment_error = False
-        self.assessment_calls = 0
-        self.structured_assessment = False
 
     def tearDown(self):
         """Без входов освобождает временную область; возвращает None."""
         self.assertTrue(self.root.resolve().is_relative_to((pipeline.ROOT / "tmp").resolve()))
         self.temporary.cleanup()
+
+    def test_replay_decision_with_prefix_is_parsed(self):
+        """Передаёт пояснение и JSON; возвращает проверенное решение candidate."""
+        reply = 'Проверка завершена.\n```json\n{"choice":"candidate","summary":"Новый результат лучше"}\n```'
+        self.assertEqual(
+            replay.parse_replay_decision(reply),
+            {"choice": "candidate", "summary": "Новый результат лучше"},
+        )
 
     def prepare(self, target, stage, materials, skill_path, executable, model, run, knowledge_materials):
         """Принимает параметры подготовки; создаёт предложение без LLM, возвращает MemoryProposal."""
@@ -119,28 +117,24 @@ class ReplayEvaluationTests(unittest.TestCase):
         self.assertTrue((self.run / "replay/result/files/output.txt").is_file())
         return "не JSON" if self.invalid_judge else json.dumps({"choice": self.choice, "summary": "Причина выбора"})
 
-    def assess(self, proposal, scenario, executable, model, context, agent_python):
-        """Принимает входы оценки; возвращает заданное run/skip либо вызывает сбой без выполнения задачи."""
-        self.assessment_calls += 1
-        if self.assessment_error:
-            raise RuntimeError("Сбой оценки возможности")
-        return {"decision": self.assessment_choice, "summary": "Причина решения о прогоне",
-                "context": {"missing": ["Снимок базы"]} if self.structured_assessment else "Сведения о контексте",
-                "resources": {"duration_seconds": 18000} if self.structured_assessment else "Сведения о затратах"}
 
-    def execute(self, enabled=True, scenario_missing=False, force_replay=False):
-        """Принимает признак прогона; выполняет порядок с имитацией процессов, возвращает None."""
+    def dialogue(self, workspace, scenario, result, model, **kwargs):
+        """Принимает входы диалога; имитирует завершённую задачу либо сбой, возвращает None."""
+        outcome = self.worker(["--workspace", str(workspace), "--result", str(result)])
+        if outcome.returncode:
+            raise RuntimeError("Прогон не завершился")
+
+    def execute(self, enabled=True, scenario_missing=False):
+        """Принимает флаг и наличие сценария; выполняет целевой личный цикл без моделей."""
         skill = pipeline.ROOT / "agents/consolidation/skills/consolidation/SKILL.md"
         with patch.object(pipeline, "prepare_memory", side_effect=self.prepare):
             with patch.object(pipeline, "review_memory", side_effect=self.review):
-                with patch.object(replay.subprocess, "run", side_effect=self.worker):
-                    with patch.object(replay, "run_codex", side_effect=self.judge), patch.object(replay, "assess_replay", side_effect=self.assess):
+                with patch("command_agent_memory.evaluation.dialogue.run_dialogue", side_effect=self.dialogue):
+                    with patch.object(replay, "run_codex", side_effect=self.judge):
                         pipeline.consolidate_with_review(
                             self.target, "personal", "Сведения", skill, "codex", "test", self.run,
                             replay_scenario=self.scenario if enabled and not scenario_missing else None,
-                            agent_python=Path(sys.executable), user_id="101",
-                            replay_requested=enabled,
-                            force_replay=force_replay,
+                            agent_python=Path(sys.executable), user_id="101", replay_requested=enabled,
                         )
 
     def test_candidate_publishes(self):
@@ -151,12 +145,28 @@ class ReplayEvaluationTests(unittest.TestCase):
         self.assertEqual(pipeline.read_memory(self.target, "personal"), self.after)
         self.assertEqual(json.loads((self.run / "status.json").read_text())["replay_choice"], "candidate")
 
-    def test_force_replay_bypasses_assessment(self):
-        """Без входов проверяет обязательный прогон без LLM-оценки пропуска; возвращает None."""
-        self.execute(force_replay=True)
-        self.assertEqual(self.assessment_calls, 0)
+    @unittest.skipUnless(importlib.util.find_spec("deepagents"), "Нужно окружение DeepAgents")
+    def test_dialogue_backend_uses_messages_and_saved_candidate(self):
+        """Запускает диалоговую границу с имитацией; проверяет отдельные реплики и итоговую оценку."""
+        self.run.mkdir()
+        proposal = pipeline.MemoryProposal(self.target, "personal", self.run, self.before, self.after)
+        scenario = replay.ReplayScenario("Первая реплика", self.inputs, self.reference,
+                                         messages=("Первая реплика", "Уточнение"), goal="Получить результат")
+
+        def dialogue(workspace, passed_scenario, result, model, **kwargs):
+            """Принимает подготовленную копию; создаёт наблюдаемый результат диалога без модели."""
+            self.assertEqual(passed_scenario.messages, scenario.messages)
+            self.assertEqual(passed_scenario.request, "Первая реплика")
+            self.assertTrue(kwargs["memory_enabled"])
+            self.worker(["--workspace", str(workspace), "--result", str(result)])
+
+        with patch("command_agent_memory.evaluation.dialogue.run_dialogue", side_effect=dialogue):
+            decision = replay.evaluate_by_replay(proposal, scenario, "", "test-model", Path(sys.executable),
+                                                 "101", backend="dialogue", runner=self.judge)
+        self.assertEqual(decision["choice"], "candidate")
         self.assertEqual(self.worker_calls, 1)
         self.assertEqual(self.judge_calls, 1)
+
 
     def test_current_preserves_memory(self):
         """Без входов проверяет отсутствие переноса при выборе current; возвращает None."""
@@ -256,50 +266,34 @@ class ReplayEvaluationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("возможен пропуск", result.stdout)
 
-    def test_skip_publishes_without_worker(self):
-        """Без входов проверяет перенос по ревью при skip и явное отсутствие успешного прогона; возвращает None."""
-        self.assessment_choice = "skip"
-        self.execute()
-        self.assertEqual(self.assessment_calls, 1)
+
+
+
+
+
+    def test_missing_scenario_is_accepted_by_review(self):
+        """Проверяет принятие по review без данных; возвращает None."""
+        self.execute(scenario_missing=True)
         self.assertEqual((self.worker_calls, self.judge_calls), (0, 0))
-        self.assertEqual(pipeline.read_memory(self.target, "personal"), self.after)
         status = json.loads((self.run / "status.json").read_text(encoding="utf-8"))
         self.assertEqual(status["replay_status"], "skipped")
         self.assertNotIn("replay_choice", status)
-        self.assertFalse((self.run / "replay").exists())
-        self.assertIn("Прогон не выполнен", (self.run / "report/replay.md").read_text(encoding="utf-8"))
-
-    def test_missing_scenario_can_skip(self):
-        """Без входов проверяет оценку и пропуск при отсутствии сценария; возвращает None."""
-        self.assessment_choice = "skip"
-        self.execute(scenario_missing=True)
-        self.assertEqual(self.assessment_calls, 1)
-        self.assertEqual(self.worker_calls, 0)
         self.assertEqual(pipeline.read_memory(self.target, "personal"), self.after)
 
-    def test_structured_assessment_is_reported(self):
-        """Без входов проверяет сохранение структуры объяснения без падения и запуска worker; возвращает None."""
-        self.structured_assessment = True
-        self.assessment_choice = "skip"
+    def test_request_without_dialogue_messages_skips(self):
+        """Проверяет, что одношаговый сценарий не запускается как диалог; возвращает None."""
+        self.scenario = replay.ReplayScenario("Запрос", self.inputs, self.reference)
         self.execute()
-        text = (self.run / "report/replay-assessment.md").read_text(encoding="utf-8")
-        self.assertIn("Снимок базы", text)
-        self.assertIn("18000", text)
         self.assertEqual(self.worker_calls, 0)
+        assessment = json.loads((self.run / "replay-assessment/decision.json").read_text(encoding="utf-8"))
+        self.assertEqual(assessment["decision"], "skip")
+        self.assertTrue(assessment["missing"])
 
-    def test_run_without_scenario_is_not_published(self):
-        """Без входов проверяет отсутствие переноса при ошибочном разрешении без сценария; возвращает None."""
-        with self.assertRaisesRegex(RuntimeError, "без предоставленного сценария"):
-            self.execute(scenario_missing=True)
-        self.assertEqual(self.worker_calls, 0)
-        self.assertEqual(pipeline.read_memory(self.target, "personal"), self.before)
-
-    def test_assessment_failure_preserves_memory(self):
-        """Без входов проверяет запрет переноса при сбое оценки вместо её пропуска; возвращает None."""
-        self.assessment_error = True
-        with self.assertRaisesRegex(RuntimeError, "Сбой оценки"):
-            self.execute()
-        self.assertEqual(self.worker_calls, 0)
+    def test_data_check_error_does_not_publish(self):
+        """Проверяет остановку при ошибке чтения данных вместо пропуска; возвращает None."""
+        with patch.object(replay, "check_replay_data", side_effect=OSError("Ошибка чтения")):
+            with self.assertRaisesRegex(OSError, "Ошибка чтения"):
+                self.execute()
         self.assertEqual(pipeline.read_memory(self.target, "personal"), self.before)
 
     def test_incomplete_context_is_available_to_assessor(self):

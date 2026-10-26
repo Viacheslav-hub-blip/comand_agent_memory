@@ -50,6 +50,18 @@ class CodexReplayAdapterTests(unittest.TestCase):
             self.assertEqual((scenario.inputs / "source.txt").read_text(), "input")
             self.assertIn("Готово", (scenario.reference / "answer.md").read_text(encoding="utf-8"))
             self.assertEqual((scenario.reference / "files/result.txt").read_text(), "output")
+            self.assertEqual(scenario.messages, ("Обработай файл",))
+            records.extend([
+                {"type": "response_item", "payload": {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "Добавь итог без изменения исходного запроса"}]}},
+                {"type": "response_item", "payload": {"type": "message", "role": "assistant",
+                 "content": [{"type": "output_text", "text": f"Итог: [результат]({result})"}]}},
+            ])
+            history.write_text("\n".join(json.dumps(item, ensure_ascii=False) for item in records), encoding="utf-8")
+            updated = load_replay_scenario(build_replay_scenario(root / "reports", root / "dialogue"))
+            self.assertEqual(updated.request, "Обработай файл")
+            self.assertEqual(updated.messages, ("Обработай файл", "Добавь итог без изменения исходного запроса"))
+            self.assertIn("Итог", (updated.reference / "answer.md").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

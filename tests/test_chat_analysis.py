@@ -5,6 +5,8 @@
 execute — запуск скрипта; test_two_reports_per_chat — две пары отчётов;
 test_failed_pass_cannot_mix_old_report — незавершённый запуск со старым файлом.
 test_unique_consolidation_runs_with_same_time — одинаковое время двух запусков.
+test_completed_chats_are_not_analyzed_again — повтор без запросов;
+test_only_new_chat_is_analyzed — добавление одной сессии.
 """
 from contextlib import closing, redirect_stdout
 import io
@@ -81,6 +83,23 @@ class ChatAnalysisTests(unittest.TestCase):
             self.execute()
         with self.assertRaisesRegex(RuntimeError, "не завершён"):
             read_reports(session.parent)
+
+    def test_completed_chats_are_not_analyzed_again(self):
+        """Проверяет отсутствие повторных вызовов для завершённых чатов; возвращает None."""
+        self.execute()
+        initial = list(self.calls)
+        self.execute()
+        self.assertEqual(self.calls, initial)
+
+    def test_only_new_chat_is_analyzed(self):
+        """Добавляет новую сессию; проверяет анализ только её истории, возвращает None."""
+        self.execute()
+        with closing(sqlite3.connect(self.workspace / "chat_logs.db")) as database:
+            database.execute("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)",
+                             (3, "u", "third", "user", "Третий чат", json.dumps({"content": "Третий чат"})))
+            database.commit()
+        self.execute()
+        self.assertEqual(self.calls[4:], [("session-third", "context"), ("session-third", "procedures")])
 
     def test_unique_consolidation_runs_with_same_time(self):
         """Без входов проверяет разные каталоги при совпадении времени запусков; возвращает None."""

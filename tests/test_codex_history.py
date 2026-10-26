@@ -56,6 +56,7 @@ class CodexHistoryTests(unittest.TestCase):
             sessions = list_sessions(root, ['a', 'b'], 1)
             self.assertEqual([s['id'] for s in sessions], ['1', '2'])
             self.assertTrue(all(s['path'].endswith('.zst') for s in sessions))
+            self.assertEqual(len(list_sessions(root, ['a', 'b'], None)), 3)
             with self.assertRaises(ValueError):
                 list_sessions(root, ['missing'])
 

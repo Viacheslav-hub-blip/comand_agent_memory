@@ -19,17 +19,23 @@ if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
 
-def create_agent(workspace: Path) -> "CompiledStateGraph":
+def create_agent(workspace: Path, *, model_name: str | None = None,
+                 memory_enabled: bool = True,
+                 read_only_paths: tuple[str, ...] = ()) -> "CompiledStateGraph":
     """Принимает рабочую область; возвращает агента с личной памятью и skills.
 
-    Модель и ключ берёт из settings.py. Новый InMemorySaver изолирует контекст
-    экземпляра. Подключает существующие индексы личных wiki/knowledge и skills.
+    model_name выбирает модель, memory_enabled включает память. read_only_paths
+    перечисляет виртуальные файлы и каталоги, запись в которые запрещена. Используется
+    базовый системный промпт DeepAgents. Значения модели берутся из settings.py,
+    ключ — из OPENROUTER_API_KEY либо settings.py. Новый InMemorySaver изолирует
+    контекст экземпляра. Подключает индексы личных и командных знаний и skills.
     Сборка агента сама по себе не отправляет запрос модели.
     """
     from deepagents import create_deep_agent
-    from deepagents.backends import LocalShellBackend
+    from robust_local_shell import RobustLocalShellBackend
     from langchain_openai import ChatOpenAI
     from langgraph.checkpoint.memory import InMemorySaver
+    from openrouter_client import openrouter_api_key, OPENROUTER_TIMEOUT_SECONDS, OPENROUTER_MAX_RETRIES
 
     import settings
 
@@ -37,24 +43,29 @@ def create_agent(workspace: Path) -> "CompiledStateGraph":
     if not workspace.is_dir():
         raise FileNotFoundError(f"Рабочая область не найдена: {workspace}")
     model = ChatOpenAI(
-        model=settings.model, api_key=settings.openrouter_api_key,
+        model=model_name or settings.model, api_key=openrouter_api_key(),
         base_url="https://openrouter.ai/api/v1",
+        timeout=OPENROUTER_TIMEOUT_SECONDS, max_retries=OPENROUTER_MAX_RETRIES,
     )
-    backend = LocalShellBackend(
+    backend = RobustLocalShellBackend(
         root_dir=workspace, virtual_mode=True, inherit_env=True,
+        read_only_paths=read_only_paths,
         env={
             "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ.get("PATH", ""),
             "PYTHONUTF8": "1",
             "PYTHONIOENCODING": locale.getpreferredencoding(False) + ":backslashreplace",
         },
     )
-    memory = ["/AGENTS.md", "/USER_PREFERENCES.md"]
-    for index in ("user_llm_wiki/INDEX.md", "knowledge/INDEX.md"):
-        if (workspace / index).is_file():
-            memory.append("/" + index)
-    skills = ["/skills/"]
-    if (workspace / "knowledge/skills").is_dir():
-        skills.append("/knowledge/skills/")
+    memory = []
+    skills = []
+    if memory_enabled:
+        for index in ("AGENTS.md", "USER_PREFERENCES.md", "user_llm_wiki/INDEX.md",
+                      "knowledge/INDEX.md", "team_knowledge/INDEX.md"):
+            if (workspace / index).is_file():
+                memory.append("/" + index)
+        for folder in ("skills", "knowledge/skills", "team_knowledge/skills"):
+            if (workspace / folder).is_dir():
+                skills.append("/" + folder + "/")
     return create_deep_agent(
         model=model, backend=backend, skills=skills,
         memory=memory, checkpointer=InMemorySaver(),
@@ -101,12 +112,14 @@ def save_message(connection: sqlite3.Connection, session_id: str, user_id: str,
 
 
 def run_turn(agent: "CompiledStateGraph", text: str, connection: sqlite3.Connection,
-             session_id: str, user_id: str, callbacks: list | None = None) -> Iterator["BaseMessage"]:
+             session_id: str, user_id: str, callbacks: list | None = None,
+             recursion_limit: int | None = None) -> Iterator["BaseMessage"]:
     """Принимает агента, текст, соединение и ID; выдаёт сохранённые ответы и сообщения инструментов.
 
     Сначала сохраняет реплику пользователя. Одинаковый session_id продолжает
     контекст агента. При сбое уже полученные сообщения остаются в базе.
     Необязательные callbacks передаются для измерения выполнения.
+    recursion_limit задаёт предел шагов графа при проверочном запуске.
     """
     from langchain_core.messages import BaseMessage, HumanMessage
 
@@ -115,6 +128,8 @@ def run_turn(agent: "CompiledStateGraph", text: str, connection: sqlite3.Connect
     config = {"configurable": {"thread_id": session_id}}
     if callbacks:
         config["callbacks"] = callbacks
+    if recursion_limit is not None:
+        config["recursion_limit"] = recursion_limit
     for event in agent.stream(
         {"messages": [message]},
         config=config, stream_mode="updates",

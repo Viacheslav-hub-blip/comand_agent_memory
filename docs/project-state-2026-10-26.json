@@ -1,0 +1,267 @@
+{
+  "git_head": "3980b7dd151c2c95501db70d14ceae90f99e1c6c",
+  "git_status": [
+    " M README.md",
+    " M agent_runtime.py",
+    " M agents/analyze-procedures/skills/analyze-procedures/SKILL.md",
+    " M agents/analyze-procedures/skills/analyze-procedures/evals/scenarios.md",
+    " M agents/analyze-procedures/skills/analyze-procedures/references/skill-authoring.md",
+    " M agents/analyze-procedures/skills/analyze-procedures/references/worked-examples.md",
+    " M agents/consolidate-knowledge/skills/consolidate-knowledge/SKILL.md",
+    " M agents/consolidate-knowledge/skills/consolidate-knowledge/references/skill-authoring.md",
+    " M agents/review-memory/skills/review-memory/SKILL.md",
+    " M agents/review-memory/skills/review-memory/references/worked-examples.md",
+    " M analyze_chats_codex.py",
+    " M consolidate_reports_codex.py",
+    " M knowledge/INDEX.md",
+    " M openrouter_client.py",
+    " M replay_codex.py",
+    " M replay_evaluation.py",
+    " M reviewed_consolidation.py",
+    " M run_synthetic_dialogues.py",
+    " M tests/test_replay_codex.py",
+    " M tests/test_replay_evaluation.py",
+    "?? command_agent_memory/",
+    "?? docs/dialogue-replay.md",
+    "?? docs/examples/replay-anna/dialogue-scenario.json",
+    "?? docs/project-description-for-manager.md",
+    "?? docs/project-state-2026-10-26.md",
+    "?? docs/project-structure.md",
+    "?? finalize_replay_run.py",
+    "?? knowledge/cases/",
+    "?? knowledge/skills/",
+    "?? knowledge/wiki/",
+    "?? resume_knowledge_review.py",
+    "?? resume_review_run.py",
+    "?? robust_local_shell.py",
+    "?? run_dialogue_replay.py",
+    "?? run_memory_ablation.py",
+    "?? tests/test_dialogue_replay.py",
+    "?? tests/test_package_architecture.py",
+    "?? tests/test_robust_local_shell.py"
+  ],
+  "files": [
+    {
+      "path": "README.md",
+      "sha256": "6ee6dba48e5da9b223db3421d2435b5e5bc15c41164f210c429897dda68ab397",
+      "bytes": 12295
+    },
+    {
+      "path": "agent_runtime.py",
+      "sha256": "3462d1045a21760789373dd5e5cab2d828d8f50ca52e7a06cb702717084bf62d",
+      "bytes": 7235
+    },
+    {
+      "path": "analyze_chats_codex.py",
+      "sha256": "b10ba5b32a2bb5b6352b7fd2eef14a2017aa2813e4ffb798148ce6d78dbebbb1",
+      "bytes": 10281
+    },
+    {
+      "path": "consolidate_reports_codex.py",
+      "sha256": "268a453d41180db3e03942ae76dfd1117e040bbf271da6dd43749160873331b1",
+      "bytes": 10882
+    },
+    {
+      "path": "memory_pipeline.py",
+      "sha256": "aac118f0d744de4f3d806644f09f5074f3376f02164615be48e90172c50acc33",
+      "bytes": 4128
+    },
+    {
+      "path": "openrouter_client.py",
+      "sha256": "5cbe67a4c0726db48c347e0c3f436b38470a3eee0898a02a081af4148af34fb5",
+      "bytes": 10149
+    },
+    {
+      "path": "reviewed_consolidation.py",
+      "sha256": "86e7698bff7305ef1fc07b8001b826571d5f46095d39fc44cf2c9ed6d76ed74f",
+      "bytes": 33785
+    },
+    {
+      "path": "replay_evaluation.py",
+      "sha256": "4b8fb7b34a65bf2273b3c31b78c6bf34b867b0bbc56ab6e4af499564a5b7fc4f",
+      "bytes": 18429
+    },
+    {
+      "path": "replay_worker.py",
+      "sha256": "22128b7f235a0f72aee39b3a087e04c16a0f38e7a90b4697aaafc17445f79a85",
+      "bytes": 5892
+    },
+    {
+      "path": "replay_codex.py",
+      "sha256": "2fa6f0415c4a8d96d07a9c7faa0da2dd5636926b520b0969900c6e5a09dbd6d0",
+      "bytes": 5511
+    },
+    {
+      "path": "run_dialogue_replay.py",
+      "sha256": "dc2b42f8990fd275cf528a3110677b7f5c138bd9031fe2722bbdf74c6523b383",
+      "bytes": 8694
+    },
+    {
+      "path": "run_memory_ablation.py",
+      "sha256": "0025dd49144e20ea85fad098cc4e87855d1a3817066cd375417fdea1c3d80e67",
+      "bytes": 5634
+    },
+    {
+      "path": "robust_local_shell.py",
+      "sha256": "cc57f3942edb5b4e7199067b4a9d0896022f1056459bac0ae44943f71b08714d",
+      "bytes": 4676
+    },
+    {
+      "path": "command_agent_memory/evaluation/dialogue.py",
+      "sha256": "de457f00967403aac51a9da9913b5aa2451f9f6952fd8a03635865a5cd8b5f8a",
+      "bytes": 19348
+    },
+    {
+      "path": "command_agent_memory/evaluation/scenario.py",
+      "sha256": "606e807aad7e055876c78e5f0587702948f69ed179d94b78357611e42684e695",
+      "bytes": 2158
+    },
+    {
+      "path": "agents/analyze-context/skills/analyze-context/SKILL.md",
+      "sha256": "52768344782b687567ecc1b07de359c32f3a5517aa5e29228fb725418d9709d9",
+      "bytes": 8984
+    },
+    {
+      "path": "agents/analyze-procedures/skills/analyze-procedures/SKILL.md",
+      "sha256": "26fb7fe2dcf51e9668f65d7fdbd27bb304bd431ae427d75cfafdf5da334ca174",
+      "bytes": 10628
+    },
+    {
+      "path": "agents/analyze-procedures/skills/analyze-procedures/references/worked-examples.md",
+      "sha256": "59d6e845770bbae75aadfbefc733ed3cf78828e41e9760402b4c79286ed3b002",
+      "bytes": 17953
+    },
+    {
+      "path": "agents/analyze-procedures/skills/analyze-procedures/references/skill-authoring.md",
+      "sha256": "3acf02e1db163760cb7d0de4f409b3e16e668b599e3504794eec767b183a8193",
+      "bytes": 3869
+    },
+    {
+      "path": "agents/analyze-procedures/skills/analyze-procedures/evals/scenarios.md",
+      "sha256": "8a5c48e850ce6600cb2c6a2a04fd09e54f4ff6e30bd1093059e3a393d83d258a",
+      "bytes": 10988
+    },
+    {
+      "path": "agents/consolidation/skills/consolidation/SKILL.md",
+      "sha256": "63c85affedd8009917a7176cff82aeabeeec920a8dcdf96bdd0134911ec66613",
+      "bytes": 19452
+    },
+    {
+      "path": "agents/consolidate-knowledge/skills/consolidate-knowledge/SKILL.md",
+      "sha256": "664e0fbca1d31fa24242ab5823f395aa7264e17c888806244d9820024c5ae771",
+      "bytes": 11483
+    },
+    {
+      "path": "agents/consolidate-knowledge/skills/consolidate-knowledge/references/skill-authoring.md",
+      "sha256": "308123ab2762f0c2f52fc156db91affc6701518b59e54042418aa5be66becf5d",
+      "bytes": 7090
+    },
+    {
+      "path": "agents/review-memory/skills/review-memory/SKILL.md",
+      "sha256": "dad8e1efc00032c38eba1b959f6888e03b2a48b0082b7d57d80e676f5719e282",
+      "bytes": 9485
+    },
+    {
+      "path": "agents/review-memory/skills/review-memory/references/worked-examples.md",
+      "sha256": "5f92e274fd48aca7ae00981c3c608463908b20d4cb4f2cca718992b5e535cefe",
+      "bytes": 7729
+    },
+    {
+      "path": "tests/test_dialogue_replay.py",
+      "sha256": "81dafce78aaf76f6d60b1956ee710f28dacb759a95e96a3fd1dd1f17062dd33a",
+      "bytes": 17975
+    },
+    {
+      "path": "tests/test_replay_evaluation.py",
+      "sha256": "cd70f46d1f97e0f050a824b7f898def6b345f5875fe5f7b10c1cd9c3dd724965",
+      "bytes": 27345
+    },
+    {
+      "path": "tests/test_shared_runtime.py",
+      "sha256": "eed714187ca4bce8826dc2a95aed8cbf99eb0f73d3e86be060d18f366dc48b9c",
+      "bytes": 9446
+    },
+    {
+      "path": "docs/dialogue-replay.md",
+      "sha256": "d2d26cd56e7e0db040a0fec5c5679c296d147d2e46fdc76304f29473e10885ed",
+      "bytes": 14275
+    },
+    {
+      "path": "docs/project-state-2026-10-26.md",
+      "sha256": "a3bf112c697d83b5d79b3d481ae43cf9bacb31d1f36f7a660cbd3be24d8db056",
+      "bytes": 33181
+    },
+    {
+      "path": "docs/examples/replay-anna/dialogue-scenario.json",
+      "sha256": "9a0a7f3af8b083f9fcccef803307e483c4268971154b3d2981c4bcfecc9200b7",
+      "bytes": 910
+    },
+    {
+      "path": "data/fc/20261025T182357Z-new-skills/metrics-summary.json",
+      "sha256": "912c0a6cc886dabec717b685ab8d8b9a565abd7deea24235fa3288776f198d08",
+      "bytes": 9830
+    },
+    {
+      "path": "data/dialogue-runs/20261026T081927190642-c90b751387b7/full/result/metrics.json",
+      "sha256": "9d944193aed5fc940d892757614c23eb2515460dca02c2e2a696e9e0eb1ef050",
+      "bytes": 4532
+    }
+  ],
+  "date": "2026-10-26",
+  "timezone": "Europe/Moscow",
+  "kind": "documentation_checkpoint_with_selected_file_hashes",
+  "git_commit_created": false,
+  "manifest_scope": "Selected source files, skill instructions, tests, documentation and two run metric files; raw data and local settings remain outside this manifest.",
+  "checks": {
+    "unittest": {
+      "command": "C:/Users/Slav4ik/PycharmProjects/deepagent/.venv/Scripts/python.exe -X utf8 -m unittest discover -s tests",
+      "run": 98,
+      "passed": 97,
+      "skipped": 1,
+      "failed": 0,
+      "duration_seconds": 36.82,
+      "skip_reason": "Windows symbolic link creation unavailable"
+    },
+    "skills_quick_validate": {
+      "passed": [
+        "analyze-procedures",
+        "consolidate-knowledge",
+        "review-memory"
+      ]
+    },
+    "checkpoint_links_valid": true
+  },
+  "current_configuration": {
+    "model": "deepseek/deepseek-v4.1-flash-1017",
+    "deepagents_version": "0.6.12",
+    "tested_agent_system_prompt": "deepagents_default",
+    "recursion_limit": 1000,
+    "case_format": [
+      "Обобщённая ситуация",
+      "Как решали в конкретной задаче",
+      "Связь с новой задачей"
+    ]
+  },
+  "last_dialogue": {
+    "run_id": "20261026T081927190642-c90b751387b7",
+    "state": "failed",
+    "settings_used": {
+      "recursion_limit": 200,
+      "custom_runtime_prompt": true,
+      "latest_case_format": false
+    },
+    "metrics_path": "data/dialogue-runs/20261026T081927190642-c90b751387b7/full/result/metrics.json"
+  },
+  "pending": [
+    "Regenerate memory using current case instructions",
+    "Run full-memory dialogue using default system prompt and recursion_limit=1000",
+    "Run paired no-memory dialogue with matching configuration",
+    "Evaluate transfer on changed tasks",
+    "Preserve provenance and scope of candidates",
+    "Deliver mandatory references in single-call analysis prompts",
+    "Reconcile default memory update guidance with read-only evaluation",
+    "Add persistent dialogue recovery checkpoints",
+    "Correct legacy metric counter labels and scopes"
+  ]
+}
+

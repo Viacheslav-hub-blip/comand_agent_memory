@@ -1,7 +1,8 @@
 """Один проверочный запуск задачи через Codex с выбранной моделью.
 
 Вход: копия памяти и входов, запрос, CLI и модель; выход: ответ, трасса и измерения.
-Функция run_codex_replay выполняет задачу один раз и сохраняет доступные метрики.
+Функции: build_replay_prompt — формирование инструкции с памятью либо baseline;
+run_codex_replay — выполнение задачи один раз и сохранение доступных метрик.
 """
 import json
 from pathlib import Path
@@ -11,31 +12,47 @@ from typing import Callable
 from codex_client import run_codex
 
 
+def build_replay_prompt(workspace: Path, request: Path, use_memory: bool) -> str:
+    """Принимает область задачи, файл запроса и режим памяти; возвращает prompt агента.
+
+    При ``use_memory=False`` инструкция не упоминает файлы личной или общей памяти.
+    Это позволяет провести воспроизводимый baseline-прогон на тех же исходных данных.
+    """
+    memory_instruction = (
+        "Сначала прочитай существующие AGENTS.md, USER_PREFERENCES.md, user_llm_wiki/INDEX.md "
+        "и knowledge/INDEX.md. Найди подходящие skills в skills/ и knowledge/skills/ "
+        "и прочитай применимые инструкции и статьи по ссылкам. Память используй только "
+        "для чтения. "
+        if use_memory else
+        "Файлы памяти, preferences, wiki, knowledge и skills в этой области отсутствуют "
+        "и не должны использоваться. "
+    )
+    return (
+        f"Рабочая область: {workspace.as_posix()}. Реши один запрос пользователя. "
+        "Используй только файлы этой рабочей области; сеть и внешние сервисы не используй. "
+        + memory_instruction
+        + "Результаты задачи сохраняй внутри рабочей области. Если в запросе "
+        "указаны пути вида /documents/ или /synthetic_team/, разрешай их относительно "
+        "физического корня этой рабочей области. Исходные данные не изменяй. "
+        "В итоговом ответе сообщи полученный результат и созданные файлы.\n\n"
+        "Запрос пользователя:\n" + request.read_text(encoding="utf-8")
+    )
+
+
 def run_codex_replay(workspace: Path, request: Path, result: Path,
                      executable: str, model: str, runner: Callable | None = None,
-                     backend: str = "codex") -> None:
+                     backend: str = "codex", use_memory: bool = True) -> None:
     """Принимает копию окружения, запрос, каталог результата, CLI и модель; возвращает None.
 
-    Агент получает только задачу, входные файлы и новую память. Прежний ответ
-    остаётся вне рабочей области. Число внутренних обращений к модели CLI
+    Агент получает задачу и входные файлы, а при ``use_memory=True`` — новую
+    память. Прежний ответ остаётся вне рабочей области. Число внутренних обращений к модели CLI
     не сообщает: model_calls сохраняется как null, а не как число turns.
     При ошибке сохраняются доступная трасса и измерения, исключение передаётся выше.
     """
     runner = runner or run_codex
     result.mkdir(parents=True, exist_ok=False)
     prefix = result / "agent"
-    prompt = (
-        f"Рабочая область: {workspace.as_posix()}. Реши один запрос пользователя. "
-        "Используй только файлы этой рабочей области; сеть и внешние сервисы не используй. "
-        "Сначала прочитай существующие AGENTS.md, USER_PREFERENCES.md, user_llm_wiki/INDEX.md "
-        "и knowledge/INDEX.md. Найди подходящие skills в skills/ и knowledge/skills/ "
-        "и прочитай применимые инструкции и статьи по ссылкам. Память используй только "
-        "для чтения. Результаты задачи сохраняй внутри рабочей области. Если в запросе "
-        "указаны пути вида /documents/ или /synthetic_team/, разрешай их относительно "
-        "физического корня этой рабочей области. Исходные данные не изменяй. "
-        "В итоговом ответе сообщи полученный результат и созданные файлы.\n\n"
-        "Запрос пользователя:\n" + request.read_text(encoding="utf-8")
-    )
+    prompt = build_replay_prompt(workspace, request, use_memory)
     state = "failed"
     try:
         answer = runner(executable, model, prompt, workspace, prefix, writable=True)

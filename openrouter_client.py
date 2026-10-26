@@ -15,6 +15,7 @@ from uuid import uuid4
 
 
 OPENROUTER_TIMEOUT_SECONDS = 180
+OPENROUTER_MAX_RETRIES = 0
 
 
 def openrouter_api_key() -> str:
@@ -80,6 +81,7 @@ def run_openrouter_chat(_runtime: str, model: str, prompt: str, cwd: Path,
         api_key=openrouter_api_key(),
         base_url="https://openrouter.ai/api/v1",
         timeout=OPENROUTER_TIMEOUT_SECONDS,
+        max_retries=OPENROUTER_MAX_RETRIES,
     )
     started = perf_counter()
     completed = False
@@ -120,10 +122,10 @@ def run_openrouter(_runtime: str, model: str, prompt: str, cwd: Path,
     """
     validate_openrouter()
     from deepagents import create_deep_agent
-    from deepagents.backends import LocalShellBackend
     from langchain_core.callbacks.usage import UsageMetadataCallbackHandler
     from langchain_core.messages import AIMessage, HumanMessage, message_to_dict
     from langchain_openai import ChatOpenAI
+    from robust_local_shell import RobustLocalShellBackend
 
     cwd = cwd.resolve()
     prefix.parent.mkdir(parents=True, exist_ok=True)
@@ -140,8 +142,9 @@ def run_openrouter(_runtime: str, model: str, prompt: str, cwd: Path,
         api_key=openrouter_api_key(),
         base_url="https://openrouter.ai/api/v1",
         timeout=OPENROUTER_TIMEOUT_SECONDS,
+        max_retries=OPENROUTER_MAX_RETRIES,
     )
-    backend = LocalShellBackend(root_dir=cwd, virtual_mode=False, inherit_env=True)
+    backend = RobustLocalShellBackend(root_dir=cwd, virtual_mode=False, inherit_env=True)
     agent = create_deep_agent(
         model=chat_model,
         backend=backend,

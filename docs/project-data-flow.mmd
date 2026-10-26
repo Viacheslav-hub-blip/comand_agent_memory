@@ -1,0 +1,86 @@
+%%{init: {"flowchart": {"wrappingWidth": 320, "nodeSpacing": 28, "rankSpacing": 32}}}%%
+%% Вертикальная схема: порядок этапов, основные данные, развилки и циклы.
+%% Дальний возврат к началу показан парой меток ↻1; локальный цикл — стрелками.
+flowchart TB
+    subgraph ANALYSIS["1. Анализ исходного чата"]
+        direction TB
+        HISTORY["↻1 История SQLite / Codex<br/>Пользователь · агент · инструменты"]
+        CONTEXT["LLM: контекст<br/>Предпочтения · инструкции · определения"]
+        PROCEDURES["LLM: решения<br/>Cases и полные процессы Skills"]
+        REPORTS["Код: сохранить два отчёта<br/>context.md + procedures.md<br/>Передавать их целиком"]
+        HISTORY --> CONTEXT
+        HISTORY --> PROCEDURES
+        CONTEXT --> REPORTS
+        PROCEDURES --> REPORTS
+    end
+
+    subgraph PERSONAL["2. Подготовка личной памяти"]
+        direction TB
+        COPY["Код: скопировать текущую память<br/>Оригинал пока не изменяется"]
+        PCON["LLM: объединить правила и предпочтения<br/>Вход: context.md<br/>AGENTS.md · USER_PREFERENCES.md · user_llm_wiki/"]
+        KCON["LLM: объединить личные знания<br/>Вход: оба отчёта<br/>knowledge/wiki · cases · skills · INDEX.md"]
+        REVIEW["LLM: проверить и исправить всю копию<br/>Вход: отчёты, прежняя память и предложение"]
+        ACCEPT{"Ревью принято<br/>без оставшихся замечаний?"}
+        REJECT["Остановить личный этап<br/>Сохранить прежнюю память и материалы"]
+        COPY --> PCON --> KCON --> REVIEW --> ACCEPT
+        ACCEPT -->|"Нет"| REJECT
+    end
+
+    subgraph VERIFY["3. Проверка и публикация личной памяти"]
+        direction TB
+        ENABLED{"Проверка прогоном включена?"}
+        ASSESS{"LLM: run или skip?<br/>При force-replay — сразу run"}
+        AGENT["Агент: решать задачу с копией памяти<br/>Только запрос и исходные файлы"]
+        MODE{"Диалоговый режим?"}
+        TESTER["LLM: пользователь-тестировщик<br/>Видит ответ, файлы, цель и эталон"]
+        NEXT{"Решение тестировщика?"}
+        MESSAGE["Код: взять выбранную исходную реплику<br/>Дословно; сохранить контекст агента"]
+        COMPARE["LLM: сравнить с прежним результатом<br/>Качество · завершённость · шаги · токены · время"]
+        BETTER{"Выбрана предложенная память?"}
+        PUBLISH["Код: проверить неизменность версий<br/>Опубликовать итоговый снимок с резервированием"]
+        KEEP["Сохранить прежнюю память<br/>Предложение и журналы остаются"]
+        ENABLED -->|"Нет: принятие по ревью"| PUBLISH
+        ENABLED -->|"Да"| ASSESS
+        ASSESS -->|"skip: сохранить причину"| PUBLISH
+        ASSESS -->|"run: нужен полный сценарий"| AGENT
+        AGENT --> MODE
+        MODE -->|"Нет: один запрос"| COMPARE
+        MODE -->|"Да: после каждого ответа"| TESTER
+        TESTER --> NEXT
+        NEXT -->|"send: следующий ход"| MESSAGE
+        MESSAGE --> AGENT
+        NEXT -->|"complete: цель подтверждена"| COMPARE
+        NEXT -->|"stop / лимит / сбой"| KEEP
+        COMPARE --> BETTER
+        BETTER -->|"candidate"| PUBLISH
+        BETTER -->|"current / inconclusive"| KEEP
+    end
+
+    subgraph TEAM["4. Командная консолидация — текущая реализация"]
+        direction TB
+        TCOPY["Код: скопировать текущие знания команды<br/>Вход: оба исходных аналитических отчёта"]
+        TCON["LLM: объединить wiki, Cases и Skills"]
+        TREVIEW["LLM: проверить и исправить копию"]
+        TOK{"Ревью принято?"}
+        TPUBLISH["Код: опубликовать командные знания<br/>Дополнительного прогона здесь нет"]
+        TKEEP["Сохранить прежние знания команды"]
+        TCOPY --> TCON --> TREVIEW --> TOK
+        TOK -->|"Да"| TPUBLISH
+        TOK -->|"Нет"| TKEEP
+    end
+
+    subgraph USE["5. Применение памяти в следующей задаче"]
+        direction TB
+        INIT["Создать новый сеанс агента<br/>Личные файлы и индексы → memory<br/>Каталоги навыков → skills"]
+        TASK["Агент читает подходящие wiki, Cases и Skills<br/>И решает новую задачу"]
+        LOG["Код: записать новый чат<br/>Сообщения, инструменты и результаты"]
+        REPEAT(("↻1"))
+        INIT --> TASK --> LOG --> REPEAT
+    end
+
+    REPORTS -->|"Отчёты контекста и решений"| COPY
+    ACCEPT -->|"Да: итоговая копия"| ENABLED
+    PUBLISH -->|"Если stage=both"| TCOPY
+    REPORTS -.->|"Оба отчёта напрямую в командный этап"| TCOPY
+    PUBLISH -->|"Личная память"| INIT
+    TPUBLISH -->|"Командный снимок при явном подключении"| INIT

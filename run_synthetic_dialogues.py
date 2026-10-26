@@ -5,10 +5,9 @@
 Выход: сообщения в терминале, отдельная память и SQLite каждого сотрудника,
 журнал сеансов в data/synthetic-team-runs/<идентификатор запуска>/sessions.json.
 
-Функции:
-    load_dialogues — прочитать и проверить готовые пользовательские реплики.
-    run_dialogue — выполнить один диалог с отдельным контекстом и показать сообщения.
-    main — подготовить рабочие области и последовательно выполнить сценарии.
+Функции: run_dialogue — выполнить один диалог с отдельным контекстом и показать
+сообщения; main — подготовить рабочие области и последовательно выполнить
+сценарии. Загрузку сценариев предоставляет command_agent_memory.synthetic.
 """
 
 import argparse
@@ -22,29 +21,7 @@ import sys
 from uuid import uuid4
 
 from agent_runtime import create_agent, open_chat_database, run_turn
-
-
-def load_dialogues(project_root: Path) -> list[dict]:
-    """Прочитать восемь сценариев; вход — корень проекта, выход — список диалогов.
-
-    Из каждого Markdown извлекаются только четыре блока text. Текст инструкций
-    оператора, эталон и контрольные запросы в сообщения агента не включаются.
-    При неполном наборе или многострочной реплике возбуждается ValueError.
-    """
-    files = sorted((project_root / "docs/examples/synthetic-team/chats").glob("*.md"))
-    participants = [("101", "Анна"), ("102", "Борис"), ("103", "Вера"), ("104", "Денис")] * 2
-    if len(files) != len(participants):
-        raise ValueError("Ожидались восемь файлов рабочих сценариев.")
-    dialogues = []
-    for number, (path, (user_id, name)) in enumerate(zip(files, participants), start=1):
-        if not path.name.startswith(f"{number:02d}-"):
-            raise ValueError(f"Нарушен порядок сценариев: {path.name}")
-        messages = re.findall(r"```text\r?\n(.*?)\r?\n```", path.read_text(encoding="utf-8"), re.S)
-        if len(messages) != 4 or any("\n" in message or not message.strip() for message in messages):
-            raise ValueError(f"Нужны четыре непустые однострочные реплики: {path.name}")
-        dialogues.append({"scenario": f"C{number:02d}", "user_id": user_id,
-                          "name": name, "source": path.name, "messages": messages})
-    return dialogues
+from command_agent_memory.synthetic import load_dialogues
 
 
 def run_dialogue(workspace: Path, dialogue: dict, connection: sqlite3.Connection, session_id: str) -> None:

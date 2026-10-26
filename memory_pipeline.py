@@ -14,8 +14,8 @@ import sqlite3
 ROOT = Path(__file__).resolve().parent
 
 
-def read_reports(directory: Path) -> tuple[str, str, int]:
-    """Принимает каталог; возвращает тексты контекста, решений и число диалогов.
+def read_reports(directory: Path, user_id: str | None = None) -> tuple[str, str, int]:
+    """Принимает каталог и владельца при наличии; возвращает два текста и число диалогов.
 
     Читает session-ID/context.md и procedures.md целиком, без разбора разделов.
     Старый session-ID.md передаётся целиком как контекст, если нет новой пары.
@@ -27,10 +27,13 @@ def read_reports(directory: Path) -> tuple[str, str, int]:
     for path in sorted(directory.glob("session-*")):
         if path.is_dir():
             manifest = path / "manifest.json"
-            if manifest.exists() and json.loads(
-                manifest.read_text(encoding="utf-8")
-            )["state"] != "completed":
-                raise RuntimeError(f"Анализ диалога не завершён: {path}")
+            if manifest.exists():
+                metadata = json.loads(manifest.read_text(encoding="utf-8"))
+                if metadata["state"] != "completed":
+                    raise RuntimeError(f"Анализ диалога не завершён: {path}")
+                owner = metadata.get("user_id")
+                if user_id is not None and owner is not None and str(owner) != str(user_id):
+                    raise ValueError(f"Отчёты принадлежат другому пользователю: {path}")
             contexts.append((path / "context.md").read_text(encoding="utf-8-sig"))
             procedures.append((path / "procedures.md").read_text(encoding="utf-8-sig"))
         elif path.suffix == ".md" and not path.with_suffix("").is_dir():

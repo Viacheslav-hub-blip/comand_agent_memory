@@ -5,6 +5,7 @@
 произвольное оформление; test_pair_replaces_legacy — выбор пары;
 test_legacy_is_complete — полный старый отчёт; test_incomplete_run — сбой запуска;
 test_multiple_sessions — несколько пар; test_missing_file — ошибка чтения.
+test_other_user_is_rejected — запрет передачи чужих отчётов в личный этап.
 """
 import json
 from pathlib import Path
@@ -71,6 +72,14 @@ class ReportInputTests(unittest.TestCase):
         (self.session / "procedures.md").unlink()
         with self.assertRaises(FileNotFoundError):
             read_reports(self.directory)
+
+    def test_other_user_is_rejected(self):
+        """Передаёт чужой manifest; проверяет изоляцию личного входа, возвращает None."""
+        (self.session / "manifest.json").write_text(json.dumps({
+            "state": "completed", "user_id": "another-user",
+        }), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "другому пользователю"):
+            read_reports(self.directory, user_id="owner")
 
 
 if __name__ == "__main__":

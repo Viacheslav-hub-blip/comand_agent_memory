@@ -1,130 +1,132 @@
 # Память пользователя и команды
 
-Проект анализирует диалоги, извлекает правила, предпочтения, определения,
-случаи решения задач и процедуры. Консолидация через Codex готовит изменения
-в копии. LLM-ревьюер проверяет и исправляет её до переноса.
+Основной цикл следует [утверждённой схеме](docs/conference-memory-flow.html):
+новые сессии → два анализа → личная консолидация → review → при включённой
+проверке диалог с новой памятью → сравнение → принятие → командное объединение.
 
-Состояние на 24 октября 2026 года: выполнены очистка старого пути обработки
-и выделение общих операций запуска. Анализ создаёт два отчёта на чат; их текст
-передаётся целиком. Личный этап готовит правила, контекст,
-wiki, cases и skills в одной копии. Ревьюер проверяет и исправляет всю версию. Флаг --evaluate-by-replay
-включает LLM-оценку контекста и затрат. Если прогон выполним и оправдан,
-выполняется одно решение задачи и сравнение результатов; иначе сохраняется
-причина пропуска и решение принимается по ревью. Отчёты этапов находятся
-в report/ внутри каталога personal/ или knowledge/ каждого запуска.
-Промежуточное хранилище и учёт командных подтверждений пока не реализованы.
+По согласованию источники пока прежние: SQLite проекта и локальные истории
+Codex. Claude Code и GigaCode остаются целевыми адаптерами. Реестр подтверждений,
+pending и conflicts отложены. Командный этап объединяет уже принятые личные
+знания без отдельного агента-review и подключает общий снимок пользователям.
 
-## Запуск
+## Основная команда
 
-Для анализа и консолидации через Codex нужны Python 3.11+ и авторизованный CLI.
-Для прямого запуска через OpenRouter нужны DeepAgents, LangChain,
-langchain-openai и переменная окружения OPENROUTER_API_KEY. Ключ в файлах
-проекта не хранится.
-
-Полный личный цикл напрямую через OpenRouter:
+Проверка входов без моделей и записи файлов:
 
 ```powershell
-$env:OPENROUTER_API_KEY = "новый-ключ"
-$workspace = "data/synthetic-team-runs/20261020T040159Z-a0d71f0d/users/101/user_workspace"
-python analyze_chats_openrouter.py --user-id 101 --workspace $workspace --model openai/gpt-5.6-terra
-python consolidate_reports_openrouter.py --user-id 101 --workspace $workspace --stage personal --model openai/gpt-5.6-terra --evaluate-by-replay --replay-scenario docs/examples/replay-anna/scenario.json
+python -X utf8 run_memory_pipeline.py --user-id 101 --workspace data/users/101 --source sqlite --validate-only
 ```
 
-Анализ выполняет один запрос без инструментов на каждый из двух отчётов чата.
-Консолидация, ревью, оценка возможности прогона, прогон и сравнение используют
-OpenRouter без запуска Codex CLI. Без полного сценария LLM может пропустить
-дорогой или невоспроизводимый прогон и записывает причину.
-
-Рабочая область передаётся явно. Пример для существующей Анны:
+Рабочая область для SQLite должна содержать chat_logs.db. Для Codex используется
+существующий источник с явно выбранными проектами:
 
 ```powershell
-$annaWorkspace = "data/synthetic-team-runs/20261020T040159Z-a0d71f0d/users/101/user_workspace"
-python analyze_chats_codex.py --user-id 101 --workspace $annaWorkspace --validate-only
-python analyze_chats_codex.py --user-id 101 --workspace $annaWorkspace
-python consolidate_reports_codex.py --user-id 101 --workspace $annaWorkspace --stage personal
-python consolidate_reports_codex.py --user-id 101 --workspace $annaWorkspace --stage knowledge
+python -X utf8 run_memory_pipeline.py --user-id slav4ik --workspace data/openrouter-runs/slav4ik --source codex --project jev_test --project offzone --validate-only
 ```
 
-Для Бориса используйте user-id 102 и его user_workspace. Последовательные
-knowledge-запуски дополняют один каталог knowledge/. --validate-only не вызывает
-модели и не создаёт файлы. Без --stage выполняются оба этапа.
+Уберите --validate-only только для реального запуска моделей. По умолчанию
+используется OpenRouter; нужны зависимости DeepAgents/LangChain и авторизация
+провайдера. Ключи в примерах не задаются. --backend codex выбирает существующий
+Codex-исполнитель анализа, консолидации и оценки.
+
+--stage personal выполняет только личный цикл; по умолчанию --stage both
+включает и командное объединение. --knowledge-dir задаёт общий каталог.
+
+## Проверка новой памяти
+
+Флаг --evaluate-by-replay включает локальную проверку наличия данных. Если
+сценария, отдельных пользовательских реплик, исходных файлов или прежнего ответа
+нет, память принимается по review со статусом skipped. Модель не оценивает цену
+прогона. При достаточных данных выполняется диалог; тестировщик подтверждает
+конечную цель, после чего оценщик сравнивает результат с прежним.
 
 ```powershell
-python user_workspace/main.py
-python run_synthetic_dialogues.py --check
-python run_synthetic_dialogues.py
+python -X utf8 run_memory_pipeline.py --user-id 101 --workspace data/users/101 --source sqlite --evaluate-by-replay --replay-scenario docs/examples/replay-anna/dialogue-scenario.json --validate-only
 ```
 
-main.py использует обычную user_workspace/, а не память Анны из примера.
-Генератор синтетики создаёт новый каталог запуска; передавайте полученный
-user_workspace анализатору и консолидатору.
+Для Codex полный диалоговый сценарий может быть собран автоматически из сохранённой
+истории и доступных файлов. Повреждённые материалы не маскируются под отсутствие
+данных. Решающий агент получает первую реплику и следующие выбранные реплики
+дословно; эталон доступен тестировщику и итоговому оценщику.
 
-## Модули
+В основном CLI больше нет --force-replay, --replay-backend и --agent-python.
+Используйте Python того окружения, где установлены зависимости диалогового агента.
 
-| Файл | Ответственность |
-| --- | --- |
-| codex_client.py | Поиск CLI, запуск, события, ошибки, время и usage |
-| openrouter_client.py | Прямой одиночный вызов и агентный запуск через OpenRouter |
-| agent_runtime.py | Сборка решающего агента, подключение личных знаний, запись сообщений |
-| replay_evaluation.py | Сценарий, копия окружения, один запуск и решение оценщика |
-| replay_worker.py | Решение одной задачи, ответ, трасса, время, шаги и usage |
-| replay_codex.py | Один прогон через Codex с выбранной моделью, ответ и измерения CLI |
-| memory_pipeline.py | Чтение отчётов целиком и выгрузка истории из SQLite |
-| reviewed_consolidation.py | Копии памяти, исправляющее ревью, итоговый снимок и перенос |
-| analyze_chats_codex.py | Два независимых анализа каждого диалога пользователя |
-| consolidate_reports_codex.py | Запуск личной и командной консолидации |
-| analyze_chats_openrouter.py | Точка запуска анализа без Codex CLI |
-| consolidate_reports_openrouter.py | Полный цикл консолидации и проверки без Codex CLI |
-| user_workspace/main.py | Консольный диалог через agent_runtime |
-| run_synthetic_dialogues.py | Восемь тестовых диалогов через тот же agent_runtime |
+## Несколько пользователей
 
-## Память и данные
+JSON-задания, пути относительно корня проекта:
 
-- chat_logs.db в рабочей области содержит сообщения пользователя, агента и инструментов.
-- raw/chat-reports-codex/session-ID/context.md и procedures.md — два отчёта на диалог; сведения запуска в manifest.json.
-- AGENTS.md, USER_PREFERENCES.md, user_llm_wiki/ и knowledge/ внутри рабочей области — личная консолидация.
-- knowledge/ в корне проекта — общие wiki, cases, skills и INDEX.md.
-- data/consolidation-runs/ — снимки, задания, журналы и решения ревьюеров.
-- data/synthetic-team-runs/ — чаты тестовой команды и результаты их обработки.
+```json
+[
+  {"user_id": "101", "workspace": "data/users/101", "source": "sqlite"},
+  {"user_id": "102", "workspace": "data/users/102", "source": "sqlite"}
+]
+```
 
-В исходном тестовом наборе восемь чатов четырёх участников и четыре прежних Codex-отчёта Анны и Бориса.
-Общий каталог содержит 4 wiki, 4 cases, 3 skills и индекс. Известные замечания
-к содержанию не исправлялись при переносе кода. Основной агент пока использует
-личные AGENTS.md, USER_PREFERENCES.md, существующие индексы user_llm_wiki/
-и knowledge/, а также прежние /skills/ и личные /knowledge/skills/.
-Общий каталог команды пока не подключён к решающему агенту.
+```powershell
+python -X utf8 run_memory_pipeline.py --users users.json --validate-only
+```
 
-## Документация
+Сначала проверяются задания всех участников. Затем выполняются независимые
+личные циклы и одно объединение принятых знаний. Области пользователей не
+должны пересекаться. Принятие без прогона хранится отдельно от успешного прогона.
 
-- [Спецификация следующей версии: два анализа, ревью с исправлениями и будущие адаптеры](openspec/specs/single-user-memory/spec.md).
-- [Как работает текущий цикл](docs/memory-pipeline.md).
-- [Хранение сообщений](docs/chat-database.md).
-- [Проверка до обновления памяти](docs/reviewed-consolidation.md).
-- [Один проверочный прогон и выбор памяти](docs/replay-evaluation.md).
-- [Ревьюер и результаты его испытаний](docs/memory-review.md).
-- [Целевая схема личной и командной памяти](docs/proposed-personal-team-memory.md).
-- [Порядок реализации](docs/implementation-plan-personal-team-memory.md).
-- [Запуск из PyCharm](OPEN_IN_PYCHARM.md).
-- [Тестовая команда](docs/examples/synthetic-team/README.md).
+Завершённые чаты повторно не анализируются. При обычном запуске с неизменными
+отчётами и памятью используются уже принятые личные и командные результаты.
+Явно запрошенная проверка --evaluate-by-replay запускает новый личный цикл,
+чтобы не подменять его прежним принятием без проверки.
 
-## Проверки без моделей
+## Отдельные этапы
+
+Существующие команды сохранены как тонкие точки входа:
+
+```powershell
+python analyze_chats_openrouter.py --user-id 101 --workspace data/users/101 --validate-only
+python consolidate_reports_openrouter.py --user-id 101 --workspace data/users/101 --stage personal --validate-only
+python consolidate_reports_openrouter.py --stage knowledge --accepted-run data/consolidation-runs/ID/personal --validate-only
+```
+
+--accepted-run можно повторить для нескольких участников. Командный вход проверяет
+state=published/unchanged, владельца, основание принятия и хеши снимка after/.
+Исходные аналитические отчёты командному консолидатору больше не передаются.
+Личные AGENTS.md, USER_PREFERENCES.md и user_llm_wiki/ не экспортируются.
+
+Командный консолидатор работает в копии и сам сообщает accepted либо оставшиеся
+проблемы. При неразрешённом противоречии сохраняется прежняя общая версия.
+Это временный режим без постоянного учёта подтверждений и без голосования.
+После публикации team_knowledge/ обновляется у перечисленных владельцев;
+agent_runtime подключает индекс и каталог навыков в новом сеансе.
+
+## Структура и данные
+
+Повторно используемый код находится в command_agent_memory/:
+
+- analysis/ — отбор сессий, анализ и версия хранилища отчётов.
+- memory/ — личная память, принятие, командное объединение и CLI этапов.
+- evaluation/ — сценарий, диалог и сравнение результатов.
+- pipeline.py — полный цикл одного или нескольких пользователей.
+- adapters/, runs/, synthetic/ — прежние исполнители, каталоги и тестовые входы.
+
+Корневые reviewed_consolidation.py и replay_evaluation.py сохраняют прежние
+импорты через тот же модуль подсистемы. Отдельные экспериментальные команды
+run_dialogue_replay.py и run_memory_ablation.py сохраняют свою методику измерений
+и не являются дополнительными этапами основного конвейера.
+
+Истории: workspace/chat_logs.db. Анализ: workspace/raw/chat-reports-*/.
+Личная память: AGENTS.md, USER_PREFERENCES.md, user_llm_wiki/, knowledge/.
+Общие знания: knowledge/ либо --knowledge-dir. Журналы: data/consolidation-runs/.
+В status.json хранятся версии входов и снимка; это технический журнал публикации,
+а не реестр независимых подтверждений.
+
+## Проверки
 
 ```powershell
 python -X utf8 -m unittest discover -s tests
-python run_synthetic_dialogues.py --check
 ```
 
-Содержание оценивают LLM. Тесты Python проверяют управление процессами,
-сохранение сообщений и условия переноса файлов.
+Новые сквозные тесты используют имитации исполнителей и запрещают сетевые соединения.
 
-## Проверка предложенной памяти решением задачи
-
-```powershell
-python consolidate_reports_codex.py --user-id 101 --workspace $annaWorkspace --stage personal --evaluate-by-replay --replay-scenario docs/examples/replay-anna/scenario.json --agent-python C:/Users/Slav4ik/PycharmProjects/deepagent/.venv/Scripts/python.exe
-```
-
-Перед запуском задайте annaWorkspace из примера выше. Сценарий Анны готов;
-прежний ответ и файлы предназначены только оценщику. Без флага дополнительного
-решения задачи нет. current, inconclusive и сбой сохраняют прежнюю память.
-Для выполнения самой задачи через Codex добавьте `--replay-backend codex --model gpt-5.6-terra`.
-Без выбора backend решающий агент по-прежнему использует DeepAgents и settings.py.
+- [Текущая структура](docs/project-structure.md).
+- [Целевая спецификация](openspec/specs/single-user-memory/spec.md).
+- [Диалоговая проверка](docs/dialogue-replay.md).
+- [Исторические результаты на 26 октября](docs/project-state-2026-10-26.md).

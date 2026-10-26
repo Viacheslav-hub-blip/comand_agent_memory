@@ -6,6 +6,7 @@
 служебной обёртки; dialogue_turns — сбор пар запроса и ответа;
 mentioned_paths — поиск локальных путей; copy_evidence — копирование файлов;
 build_replay_scenario — выбор диалога и создание полного сценария.
+Класс ReplayDataUnavailable обозначает отсутствие материалов для прогона.
 """
 from html import unescape
 import json
@@ -18,6 +19,10 @@ IGNORED_USER_PREFIXES = (
     "<recommended_plugins>", "<environment_context>", "<app-context>",
     "<skills", "# AGENTS.md instructions",
 )
+
+
+class ReplayDataUnavailable(ValueError):
+    """Принимает причину отсутствия материалов; отличает её от повреждения истории."""
 
 
 def message_text(payload: dict) -> str:
@@ -130,19 +135,26 @@ def build_replay_scenario(reports: Path, destination: Path,
         history = Path(manifest["history"])
         if not history.is_file():
             continue
-        for request, answer, source in dialogue_turns(history):
-            inputs = mentioned_paths(source)
-            references = mentioned_paths(answer)
-            score = len(inputs) * 100 + len(references) * 10 + min(len(request), 1000) / 1000
-            candidates.append((score, manifest, history, request, answer, inputs, references))
+        turns = dialogue_turns(history)
+        if not turns:
+            continue
+        messages = [request for request, _, _ in turns]
+        inputs = mentioned_paths(turns[0][2])
+        answer = turns[-1][1]
+        references = mentioned_paths(answer)
+        if not inputs:
+            continue
+        if any(left == right or left.is_relative_to(right) or right.is_relative_to(left)
+               for left in inputs for right in references):
+            continue
+        score = len(inputs) * 100 + len(references) * 10 + len(messages)
+        candidates.append((score, manifest, history, messages, answer, inputs, references))
     if not candidates:
         suffix = f" {session_id}" if session_id else ""
-        raise ValueError(f"Не найден полный диалог Codex для сценария{suffix}.")
-    _, manifest, history, request, answer, inputs, references = max(candidates, key=lambda item: item[0])
-    if not inputs:
-        raise ValueError("В выбранном запросе не найдены доступные входные файлы.")
+        raise ReplayDataUnavailable(f"Не найден полный диалог Codex с исходными файлами для сценария{suffix}.")
+    _, manifest, history, messages, answer, inputs, references = max(candidates, key=lambda item: item[0])
     if destination.exists():
-        shutil.rmtree(destination)
+        raise FileExistsError(f"Каталог сценария уже существует: {destination}")
     inputs_directory = destination / "inputs"
     reference_directory = destination / "reference"
     copy_evidence(inputs, inputs_directory)
@@ -150,7 +162,9 @@ def build_replay_scenario(reports: Path, destination: Path,
     reference_directory.mkdir(parents=True, exist_ok=True)
     (reference_directory / "answer.md").write_text(answer, encoding="utf-8")
     scenario = {
-        "request": request,
+        "request": messages[0],
+        "messages": messages,
+        "goal": "Выполнить исходный диалог целиком и подтвердить конечный результат по репликам и эталону.",
         "inputs": "inputs",
         "reference": "reference",
         "history": str(history.resolve()),
