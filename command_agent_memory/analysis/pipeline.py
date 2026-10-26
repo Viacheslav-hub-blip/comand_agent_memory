@@ -67,8 +67,7 @@ def main(argv: list[str] | None = None) -> Path:
         "procedures": ROOT / "agents/analyze-procedures/skills/analyze-procedures/SKILL.md",
     }
     procedure_references = (
-        skills["procedures"].parent / "references/skill-authoring.md",
-        skills["procedures"].parent / "references/worked-examples.md",
+        skills["procedures"].parent / "references/examples.md",
     )
     required = (*skills.values(), *procedure_references) + (
         (database_path,) if args.source == "sqlite" else ()

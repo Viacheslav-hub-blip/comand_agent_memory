@@ -205,7 +205,7 @@ def prepare_memory(target: Path, stage: str, materials: str, skill_path: Path,
     (run / "rules.md").write_text(rules, encoding="utf-8")
     review_skill = ROOT / "agents/review-memory/skills/review-memory/SKILL.md"
     (run / "review-SKILL.md").write_text(review_skill.read_text(encoding="utf-8-sig"), encoding="utf-8")
-    review_examples = ROOT / "agents/review-memory/skills/review-memory/references/worked-examples.md"
+    review_examples = ROOT / "agents/review-memory/skills/review-memory/references/examples.md"
     (run / "review-worked-examples.md").write_text(
         review_examples.read_text(encoding="utf-8-sig"), encoding="utf-8"
     )
