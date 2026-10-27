@@ -7,6 +7,7 @@ main — разбор аргументов командной строки и з
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -54,12 +55,14 @@ def copy_resume_inputs(source: Path, destination: Path) -> None:
 
 
 def resume_personal_review(source: Path, destination: Path, target: Path, model: str,
-                           scenario_path: Path, agent_python: Path, user_id: str) -> dict:
+                           scenario_path: Path | None, agent_python: Path | None,
+                           user_id: str) -> dict:
     """Возобновляет review личной памяти и возвращает итоговое состояние запуска.
 
-    Входы: неудачный запуск, новый журнал, рабочая память, модель, replay-сценарий,
-    Python агента и пользователь. Выход: словарь состояния. Публикация выполняется
-    только после принятого review и выбора ``candidate`` в replay-сравнении.
+    Входы: неудачный запуск, новый журнал, рабочая память, модель, необязательные
+    replay-сценарий и Python агента, пользователь. Выход: словарь состояния.
+    Без сценария публикация выполняется после принятого review; со сценарием также
+    требуется выбор ``candidate`` в replay-сравнении.
     """
     source, destination, target = source.resolve(), destination.resolve(), target.resolve()
     if not source.is_relative_to(ROOT) or not destination.is_relative_to(ROOT):
@@ -67,15 +70,18 @@ def resume_personal_review(source: Path, destination: Path, target: Path, model:
     if not target.is_relative_to(ROOT) or target == ROOT:
         raise RuntimeError("Рабочая память должна находиться внутри проекта и не совпадать с корнем.")
     copy_resume_inputs(source, destination)
-    scenario = load_replay_scenario(scenario_path.resolve())
+    if (scenario_path is None) != (agent_python is None):
+        raise ValueError("replay-сценарий и Python агента указываются вместе.")
+    scenario = load_replay_scenario(scenario_path.resolve()) if scenario_path else None
     before = read_memory(destination / "before", "personal")
     candidate = read_memory(destination / "before-review", "personal")
     status = {
         "stage": "personal",
         "target": str(target),
+        "user_id": user_id,
         "resumed_from": str(source),
         "state": "running",
-        "replay_status": "pending",
+        "replay_status": "pending" if scenario else "not_requested",
     }
     proposal = MemoryProposal(target, "personal", destination, before, candidate)
     try:
@@ -98,27 +104,34 @@ def resume_personal_review(source: Path, destination: Path, target: Path, model:
                 status["state"] = "rejected"
                 raise RuntimeError(f"Память отклонена review: {decision['summary']}")
             status["reviews"] = decision["reviews"]
-            status["replay_status"] = "running"
-            write_stage_report(
-                destination, "replay", "Проверка решением задачи", "running",
-                "Выполняется обязательный replay с новой памятью.",
-            )
-            evaluation = evaluate_by_replay(
-                proposal, scenario, "", model, agent_python.resolve(), user_id,
-                backend="openrouter", runner=run_openrouter,
-            )
-            status.update(replay_status="completed", replay_choice=evaluation["choice"])
-            write_stage_report(
-                destination, "replay", "Проверка решением задачи", "completed",
-                f"Выбор: {evaluation['choice']}\n\n{evaluation['summary']}",
-                links={"Сравнение": destination / "replay/decision.json",
-                       "Результат": destination / "replay/result"},
-            )
-            if evaluation["choice"] != "candidate":
-                status["state"] = "rejected"
-                raise RuntimeError(f"Новая память не выбрана replay: {evaluation['summary']}")
+            if scenario and agent_python:
+                status["replay_status"] = "running"
+                write_stage_report(
+                    destination, "replay", "Проверка решением задачи", "running",
+                    "Выполняется обязательный replay с новой памятью.",
+                )
+                evaluation = evaluate_by_replay(
+                    proposal, scenario, "", model, agent_python.resolve(), user_id,
+                    backend="openrouter", runner=run_openrouter,
+                )
+                status.update(replay_status="completed", replay_choice=evaluation["choice"])
+                write_stage_report(
+                    destination, "replay", "Проверка решением задачи", "completed",
+                    f"Выбор: {evaluation['choice']}\n\n{evaluation['summary']}",
+                    links={"Сравнение": destination / "replay/decision.json",
+                           "Результат": destination / "replay/result"},
+                )
+                if evaluation["choice"] != "candidate":
+                    status["state"] = "rejected"
+                    raise RuntimeError(f"Новая память не выбрана replay: {evaluation['summary']}")
             publish_memory(target, before, proposal.after, "personal", destination)
-            status["state"] = "published"
+            status.update(
+                state="published",
+                snapshot_sha256={
+                    name: hashlib.sha256(content).hexdigest()
+                    for name, content in proposal.after.items()
+                },
+            )
     except BaseException as error:
         status.setdefault("error", str(error))
         if status["state"] == "running":
@@ -146,8 +159,8 @@ def main() -> None:
     parser.add_argument("--destination-run", type=Path, required=True)
     parser.add_argument("--workspace", type=Path, required=True)
     parser.add_argument("--model", required=True)
-    parser.add_argument("--replay-scenario", type=Path, required=True)
-    parser.add_argument("--agent-python", type=Path, required=True)
+    parser.add_argument("--replay-scenario", type=Path)
+    parser.add_argument("--agent-python", type=Path)
     parser.add_argument("--user-id", required=True)
     args = parser.parse_args()
     status = resume_personal_review(
@@ -155,7 +168,7 @@ def main() -> None:
         ROOT / args.destination_run,
         ROOT / args.workspace,
         args.model,
-        ROOT / args.replay_scenario,
+        ROOT / args.replay_scenario if args.replay_scenario else None,
         args.agent_python,
         args.user_id,
     )
