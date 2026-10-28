@@ -2,6 +2,8 @@
 
 Классы: TesterDecision — строгая схема следующего действия;
 OpenRouterTester — отдельный контекст тестировщика и его измерения.
+ConfiguredSubject — диалог через настроенного исполнителя этапа replay_agent.
+Методы OpenRouterTester: __init__, decide; ConfiguredSubject: __init__, stream.
 Функции: parse_tester_decision — разбор ответа; file_hashes — снимок файлов;
 collect_artifacts — сведения о результатах; metrics_record — снимок счётчиков;
 advance_dialogue — проверка перехода; run_dialogue — выполнение полного диалога.
@@ -143,10 +145,10 @@ class OpenRouterTester:
     """
 
     def __init__(self, scenario: ReplayScenario, model: str, directory: Path,
-                 artifact_text_limit: int = 120_000):
+                 artifact_text_limit: int = 120_000, runtime=None):
         """Принимает сценарий, модель и журнал; создаёт контекст тестировщика."""
-        from langchain_openai import ChatOpenAI
-
+        self.runtime = runtime
+        self.calls = 0
         self.directory = directory
         self.directory.mkdir()
         self.metrics = ReplayMetrics()
@@ -176,6 +178,11 @@ class OpenRouterTester:
         )
         self.messages = [SystemMessage(content=system)]
         (directory / "initialization.md").write_text(system, encoding="utf-8")
+        if runtime is not None:
+            self.model = None
+            return
+        from langchain_openai import ChatOpenAI
+
         self.model = ChatOpenAI(
             model=model, api_key=openrouter_api_key(), base_url="https://openrouter.ai/api/v1",
             timeout=OPENROUTER_TIMEOUT_SECONDS, max_retries=OPENROUTER_MAX_RETRIES,
@@ -189,7 +196,14 @@ class OpenRouterTester:
         with (self.directory / "transcript.jsonl").open("a", encoding="utf-8") as trace:
             trace.write(json.dumps(message_to_dict(message), ensure_ascii=False) + "\n")
             try:
-                response = self.model.invoke(self.messages, config={"callbacks": [self.metrics]})
+                if self.runtime is not None:
+                    self.calls += 1
+                    prompt = json.dumps([message_to_dict(item) for item in self.messages], ensure_ascii=False)
+                    text = self.runtime.run("replay_tester", prompt, self.directory,
+                                            self.directory / f"decision-{self.calls:03d}")
+                    response = AIMessage(content=text)
+                else:
+                    response = self.model.invoke(self.messages, config={"callbacks": [self.metrics]})
                 self.messages.append(response)
                 trace.write(json.dumps(message_to_dict(response), ensure_ascii=False, default=str) + "\n")
                 return parse_tester_decision(response.text)
@@ -197,16 +211,51 @@ class OpenRouterTester:
                 self.duration += perf_counter() - started
 
 
+class ConfiguredSubject:
+    """Принимает runtime и копию памяти; передаёт накопленный диалог исполнителю replay_agent.
+
+    Каждый ход использует выбранного провайдера. Между ходами сохраняются
+    пользовательские реплики, итоговые ответы и файлы рабочей копии.
+    """
+
+    def __init__(self, runtime, workspace: Path, directory: Path, protected: dict, memory_layout):
+        """Принимает настройки, пути и защищённые файлы; создаёт пустой контекст диалога."""
+        self.runtime, self.workspace, self.directory = runtime, workspace, directory
+        self.messages = []
+        self.protected = protected
+        self.layout = memory_layout
+        self.turn = 0
+
+    def stream(self, inputs, config, stream_mode="updates"):
+        """Принимает сообщения и параметры run_turn; выдаёт один ответ настроенного агента."""
+        self.messages.extend(inputs["messages"])
+        self.turn += 1
+        memory = self.layout.instructions() if self.layout is not None else "Используй файлы памяти в рабочей области."
+        prompt = (f"Решай задачу в рабочей копии {self.workspace.as_posix()}. "
+                  + memory + f"\nФайлы только для чтения: {list(self.protected)}. "
+                  "Не изменяй память и исходные данные. Сохраняй результаты задачи в рабочую область. "
+                  "В диалоге ниже соблюдай порядок и дословный текст пользовательских реплик.\n\n"
+                  + json.dumps([message_to_dict(item) for item in self.messages], ensure_ascii=False))
+        text = self.runtime.run("replay_agent", prompt, self.workspace,
+                                self.directory / f"subject-{self.turn:03d}", agent=True, writable=True)
+        response = AIMessage(content=text)
+        self.messages.append(response)
+        yield {"agent": {"messages": [response]}}
+
+
 def run_dialogue(workspace: Path, scenario: ReplayScenario, result: Path, model: str,
                  *, user_id: str = "101", memory_enabled: bool = True,
                  tester_model: str | None = None, max_user_turns: int | None = None,
-                 recursion_limit: int = 1000, artifact_text_limit: int = 120_000) -> dict:
+                 recursion_limit: int = 1000, artifact_text_limit: int = 120_000,
+                 runtime=None, memory_layout=None) -> dict:
     """Принимает чистую область и сценарий; сохраняет диалог и раздельные показатели.
 
     Первый HumanMessage равен первой исходной реплике. Один экземпляр решающего
     агента и его thread_id сохраняются на весь диалог. Тестировщик выбирает
     последующие реплики по ответам. Возвращает metrics.json; сбой сохраняет
     частичный журнал и передаёт исключение вызывающему коду.
+    runtime включает выбор провайдеров и пожелания; memory_layout перечисляет
+    защищённые файлы памяти подключённого агента.
     """
     if not scenario.messages or scenario.request != scenario.messages[0]:
         raise ValueError("Для диалога нужны отдельные сообщения и точная первая реплика.")
@@ -224,6 +273,11 @@ def run_dialogue(workspace: Path, scenario: ReplayScenario, result: Path, model:
     memory_entries = {"AGENTS.md", "USER_PREFERENCES.md", "user_llm_wiki", "knowledge", "skills", "team_knowledge"}
     protected = {path: value for path, value in baseline.items()
                  if path.split("/")[0] in memory_entries | {scenario.inputs.name}}
+    if memory_layout is not None:
+        from command_agent_memory.memory.store import FileMemoryStore
+
+        memory_store = FileMemoryStore(workspace, memory_layout.entries)
+        protected.update({name: baseline[name] for name in memory_store.snapshot()})
     (result / "initialization.json").write_text(json.dumps({
         "model": model, "tester_model": tester_model or model, "memory_enabled": memory_enabled,
         "workspace": str(workspace), "system_prompt": None, "system_prompt_source": "deepagents_default",
@@ -245,11 +299,16 @@ def run_dialogue(workspace: Path, scenario: ReplayScenario, result: Path, model:
     turns = []
     decision = None
     try:
-        agent = create_agent(
-            workspace, model_name=model, memory_enabled=memory_enabled,
-            read_only_paths=tuple("/" + path for path in protected),
-        )
-        tester = OpenRouterTester(scenario, tester_model or model, result / "tester", artifact_text_limit)
+        if runtime is not None:
+            agent = ConfiguredSubject(runtime, workspace, result, protected, memory_layout)
+            tester = OpenRouterTester(scenario, tester_model or model, result / "tester",
+                                      artifact_text_limit, runtime=runtime)
+        else:
+            agent = create_agent(
+                workspace, model_name=model, memory_enabled=memory_enabled,
+                read_only_paths=tuple("/" + path for path in protected),
+            )
+            tester = OpenRouterTester(scenario, tester_model or model, result / "tester", artifact_text_limit)
         message_index = 1
         with (result / "transcript.jsonl").open("w", encoding="utf-8") as trace:
             while True:
@@ -277,6 +336,8 @@ def run_dialogue(workspace: Path, scenario: ReplayScenario, result: Path, model:
                 (result / "answer.md").write_text(answer, encoding="utf-8")
                 current = file_hashes(workspace)
                 added_memory = any(path not in baseline and path.split("/")[0] in memory_entries for path in current)
+                if memory_layout is not None:
+                    added_memory = added_memory or any(name not in baseline for name in memory_store.snapshot())
                 if added_memory or any(current.get(path) != digest for path, digest in protected.items()):
                     raise RuntimeError("Обнаружено изменение исходных данных или памяти.")
                 observation = {
@@ -310,5 +371,13 @@ def run_dialogue(workspace: Path, scenario: ReplayScenario, result: Path, model:
             "tester": metrics_record(tester.metrics, tester.duration) if tester else None,
             "decision": decision.model_dump() if decision else None,
         }
+        if runtime is not None:
+            metrics.update(model=runtime.settings["replay_agent"].model,
+                           tested_agent={"model_calls": None, "tool_calls": None, "usage": None,
+                                         "usage_complete": False, "duration_seconds": agent_duration},
+                           tester={"model_calls": None, "tool_calls": None, "usage": None,
+                                   "usage_complete": False, "duration_seconds": tester.duration if tester else None},
+                           model_calls=None, tool_calls=None, usage=None, usage_complete=False,
+                           provider_metrics=[str(path) for path in sorted(result.rglob("*.metrics.json"))])
         (result / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     return metrics

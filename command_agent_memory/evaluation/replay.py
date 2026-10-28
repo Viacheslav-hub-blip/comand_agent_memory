@@ -79,20 +79,23 @@ def parse_replay_decision(reply: str) -> dict:
     return decisions[-1]
 
 
-def load_replay_scenario(path: Path, allow_incomplete: bool = False) -> ReplayScenario:
+def load_replay_scenario(path: Path, allow_incomplete: bool = False,
+                         allowed_root: Path | None = None) -> ReplayScenario:
     """Принимает путь JSON; возвращает сценарий с абсолютными путями либо вызывает ValueError.
 
     Пути inputs и reference разрешаются относительно JSON внутри проекта.
+    allowed_root задаёт другую допустимую область для подключённого агента.
     В режиме allow_incomplete отсутствие запроса, входов или ответа передаётся LLM
     для оценки. Типы полей и границы путей проверяются в обоих режимах.
     """
     path = path.resolve()
-    if not path.is_file() or not path.is_relative_to(ROOT):
-        raise ValueError("Сценарий должен быть JSON-файлом внутри проекта.")
+    root = (allowed_root or ROOT).resolve()
+    if not path.is_file() or not path.is_relative_to(root):
+        raise ValueError("Сценарий должен быть JSON-файлом внутри допустимой области.")
     data = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(data, dict) or not isinstance(data.get("request", ""), str):
         raise ValueError("Сценарий должен быть объектом с текстовым request.")
-    messages = load_user_messages(data, path, ROOT)
+    messages = load_user_messages(data, path, root)
     request = data.get("request", "") or (messages[0] if messages else "")
     if messages and request != messages[0]:
         raise ValueError("request должен совпадать с первой исходной репликой.")
@@ -106,9 +109,9 @@ def load_replay_scenario(path: Path, allow_incomplete: bool = False) -> ReplaySc
         if not isinstance(data.get(name), str) or not data[name]:
             raise ValueError(f"В сценарии нужен путь {name}.")
         directory = (path.parent / data[name]).resolve()
-        if (directory == ROOT or not directory.is_relative_to(ROOT)
+        if (directory == root or not directory.is_relative_to(root)
                 or (not allow_incomplete and not directory.is_dir())):
-            raise ValueError(f"{name}: нужен каталог внутри проекта.")
+            raise ValueError(f"{name}: нужен каталог внутри допустимой области.")
         directories.append(directory)
     inputs, reference = directories
     if inputs is not None and reference is not None and (
@@ -126,8 +129,8 @@ def load_replay_scenario(path: Path, allow_incomplete: bool = False) -> ReplaySc
         if not isinstance(history, str) or not history:
             raise ValueError("history должен быть путём или null.")
         history = (path.parent / history).resolve()
-        if not history.is_relative_to(ROOT) or history == ROOT:
-            raise ValueError("history должен находиться внутри проекта.")
+        if not history.is_relative_to(root) or history == root:
+            raise ValueError("history должен находиться внутри допустимой области.")
     notes = data.get("resource_notes", "")
     if not isinstance(notes, str):
         raise ValueError("resource_notes должен быть строкой.")
@@ -240,13 +243,15 @@ def copy_directory(source: Path, destination: Path) -> None:
 def evaluate_by_replay(proposal: MemoryProposal, scenario: ReplayScenario,
                        executable: str, model: str, agent_python: Path,
                        user_id: str, backend: str = "deepagents",
-                       runner: Callable | None = None) -> dict:
+                       runner: Callable | None = None, runtime=None) -> dict:
     """Принимает предложение, сценарий, CLI, модель, Python и пользователя; возвращает выбор LLM.
 
     backend выбирает DeepAgents либо Codex с переданной моделью.
     Один раз запускает решающего агента в копии. Прежние ответы передаются только
     оценщику. Любой сбой вызывает исключение без переноса памяти. Выбор current
     или inconclusive также не является разрешением переноса.
+    runtime выбирает независимые модели решающего агента, тестировщика и оценщика;
+    proposal.layout задаёт защищённые пути внешней памяти.
     """
     runner = runner or run_codex
     if backend not in ("deepagents", "codex", "openrouter", "dialogue"):
@@ -259,6 +264,10 @@ def evaluate_by_replay(proposal: MemoryProposal, scenario: ReplayScenario,
     directory.mkdir()
     workspace = directory / "workspace"
     write_snapshot(workspace, proposal.after)
+    if proposal.layout is not None:
+        if any(Path(scenario.inputs.name).is_relative_to(Path(name))
+               or Path(name).is_relative_to(Path(scenario.inputs.name)) for name in proposal.layout.entries):
+            raise ValueError("Входные файлы прогона пересекаются с настроенной памятью.")
     copy_directory(scenario.inputs, workspace / scenario.inputs.name)
     if (proposal.target / "skills").is_dir():
         copy_directory(proposal.target / "skills", workspace / "skills")
@@ -279,8 +288,9 @@ def evaluate_by_replay(proposal: MemoryProposal, scenario: ReplayScenario,
         if backend == "dialogue":
             from command_agent_memory.evaluation.dialogue import run_dialogue
 
+            options = ({"runtime": runtime, "memory_layout": proposal.layout} if runtime is not None else {})
             run_dialogue(workspace, scenario, directory / "result", model,
-                         user_id=user_id, memory_enabled=True)
+                         user_id=user_id, memory_enabled=True, **options)
             result = subprocess.CompletedProcess([], 0)
         elif backend in ("codex", "openrouter"):
             from replay_codex import run_codex_replay
@@ -303,11 +313,16 @@ def evaluate_by_replay(proposal: MemoryProposal, scenario: ReplayScenario,
     metrics = json.loads((directory / "result/metrics.json").read_text(encoding="utf-8"))
     if metrics.get("state") != "completed" or not (directory / "result/answer.md").is_file():
         raise RuntimeError("Прогон не сохранил завершённый результат.")
-    if read_memory(workspace, "personal") != proposal.after:
+    if read_memory(workspace, "personal", proposal.layout) != proposal.after:
         raise RuntimeError("Агент изменил память во время прогона; перенос отменён.")
     files = directory / "result/files"
     files.mkdir()
     for path in workspace.iterdir():
+        if proposal.layout is not None:
+            relative = path.relative_to(workspace)
+            if any(relative.is_relative_to(Path(name)) or Path(name).is_relative_to(relative)
+                   for name in proposal.layout.entries):
+                continue
         if path.name in (*PERSONAL_MEMORY_ENTRIES, "skills"):
             continue
         if path.is_dir():
@@ -327,7 +342,8 @@ def evaluate_by_replay(proposal: MemoryProposal, scenario: ReplayScenario,
         + f"Новый результат, файлы, трасса и измерения: {(directory / 'result').as_posix()}. "
         + "Сравни результаты. Файлы не изменяй. Верни JSON по skill."
     )
-    reply = runner(executable, model, prompt, directory / "evaluation", directory / "evaluation/judge")
+    judge_runner = runtime.runner("evaluation") if runtime is not None else runner
+    reply = judge_runner(executable, model, prompt, directory / "evaluation", directory / "evaluation/judge")
     decision = parse_replay_decision(reply)
     (directory / "decision.json").write_text(json.dumps(decision, ensure_ascii=False, indent=2), encoding="utf-8")
     return decision

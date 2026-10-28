@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import sys
 
 from memory_pipeline import ROOT
 from command_agent_memory.analysis.pipeline import main as analyze
@@ -105,7 +106,20 @@ def main(argv: list[str] | None = None) -> None:
     проверки запуск с неизменными входами использует уже принятые результаты.
     Реестр, pending и conflicts остаются отложенными.
     """
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if any(value == "--config" or value.startswith("--config=") for value in arguments):
+        from command_agent_memory.connections import run_connections
+
+        parser = argparse.ArgumentParser(description="Подключение истории и памяти рабочего агента")
+        parser.add_argument("--config", type=Path, required=True)
+        parser.add_argument("--validate-only", action="store_true")
+        parser.add_argument("--evaluate-by-replay", action="store_true")
+        args = parser.parse_args(arguments)
+        run_connections(args.config, validate_only=args.validate_only,
+                        evaluate_by_replay=args.evaluate_by_replay)
+        return
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, help="JSON подключения внешнего агента; отдельный режим")
     parser.add_argument("--users", type=Path, help="JSON со списком заданий пользователей")
     parser.add_argument("--user-id")
     parser.add_argument("--workspace", type=Path)

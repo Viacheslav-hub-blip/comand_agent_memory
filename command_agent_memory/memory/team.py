@@ -18,6 +18,7 @@ from command_agent_memory.memory.personal import (
     read_memory, read_rules, write_snapshot,
 )
 from run_reports import write_stage_report
+from command_agent_memory.memory.store import FileMemoryStore, MemoryLayout
 
 
 def read_accepted_knowledge(run: Path) -> tuple[dict, dict[str, bytes]]:
@@ -27,9 +28,10 @@ def read_accepted_knowledge(run: Path) -> tuple[dict, dict[str, bytes]]:
     вызывают ValueError. Личные правила, предпочтения и user_llm_wiki не экспортируются.
     """
     run = run.resolve()
-    if run == ROOT or not run.is_relative_to(ROOT):
-        raise ValueError("Принятый запуск должен находиться внутри проекта.")
     status = json.loads((run / "status.json").read_text(encoding="utf-8"))
+    configured = "memory_layout" in status
+    if not configured and (run == ROOT or not run.is_relative_to(ROOT)):
+        raise ValueError("Принятый запуск должен находиться внутри проекта.")
     if status.get("stage") != "personal" or status.get("state") not in ("published", "unchanged"):
         raise ValueError(f"Личная память не была принята: {run}")
     if not status.get("user_id") or not isinstance(status.get("snapshot_sha256"), dict):
@@ -39,28 +41,38 @@ def read_accepted_knowledge(run: Path) -> tuple[dict, dict[str, bytes]]:
     if status["replay_status"] == "completed" and status.get("replay_choice") != "candidate":
         raise ValueError(f"Проверка не выбрала предложенную память: {run}")
     target = Path(status.get("target", "")).resolve()
-    if target == ROOT or not target.is_relative_to(ROOT) or not target.is_dir():
+    if ((not configured and (target == ROOT or not target.is_relative_to(ROOT) or not target.is_dir()))
+            or (configured and target.exists() and not target.is_dir())):
         raise ValueError(f"Некорректная область владельца принятого снимка: {run}")
-    snapshot = read_memory(run / "after", "personal")
+    layout = MemoryLayout(tuple(status["memory_layout"]["personal"]),
+                          tuple(status["memory_layout"]["knowledge"])) if configured else None
+    snapshot = read_memory(run / "after", "personal", layout)
     hashes = {name: hashlib.sha256(content).hexdigest() for name, content in snapshot.items()}
     if hashes != status["snapshot_sha256"]:
         raise ValueError(f"Принятый снимок изменён: {run}")
     files = {name.removeprefix("knowledge/"): content for name, content in snapshot.items()
              if name.startswith("knowledge/")}
+    if layout is not None:
+        files = {name: content for name, content in snapshot.items()
+                 if any(Path(name).is_relative_to(Path(entry)) for entry in layout.knowledge)}
     return status, files
 
 
 def consolidate_team_memory(target: Path, accepted_runs: list[Path], run: Path,
-                            executable: str, model: str, runner: Callable) -> dict:
+                            executable: str, model: str, runner: Callable, *, configured: bool = False,
+                            configuration_sha256: str | None = None) -> dict:
     """Принимает общую память, личные запуски и LLM; возвращает состояние публикации.
 
     Входы проверяются до вызова модели. Один консолидатор объединяет знания и
     сообщает accepted либо оставшиеся проблемы. Отдельного агента-review нет.
     При отказе, сбое или изменении источников общая память не публикуется.
+    configured разрешает явно настроенные внешние каталоги; configuration_sha256
+    сохраняет версию моделей и пожеланий для повторного запуска.
     """
     target, run = target.resolve(), run.resolve()
-    if (target == ROOT or run == ROOT or not target.is_relative_to(ROOT)
-            or not run.is_relative_to(ROOT) or target.is_relative_to(run) or run.is_relative_to(target)):
+    if ((not configured and (target == ROOT or run == ROOT or not target.is_relative_to(ROOT)
+                            or not run.is_relative_to(ROOT)))
+            or target.is_relative_to(run) or run.is_relative_to(target)):
         raise ValueError("Командная память и запуск должны быть раздельными каталогами проекта.")
     accepted_runs = list(dict.fromkeys(path.resolve() for path in accepted_runs))
     if not accepted_runs:
@@ -68,12 +80,20 @@ def consolidate_team_memory(target: Path, accepted_runs: list[Path], run: Path,
     sources = [(path, *read_accepted_knowledge(path)) for path in accepted_runs]
     if any(target.is_relative_to(path) or path.is_relative_to(target) for path in accepted_runs):
         raise ValueError("Командная память не должна пересекаться с личными запусками.")
-    if any(target.is_relative_to(Path(metadata["target"])) or Path(metadata["target"]).is_relative_to(target)
-           for _, metadata, _ in sources):
+    owner_paths = []
+    for _, metadata, _ in sources:
+        owner = Path(metadata["target"])
+        if configured and "memory_layout" in metadata:
+            owner_paths.extend(owner / name for group in metadata["memory_layout"].values() for name in group)
+        else:
+            owner_paths.append(owner)
+    if any(target.is_relative_to(owner) or owner.is_relative_to(target) for owner in owner_paths):
         raise ValueError("Командная память не должна пересекаться с личными областями.")
     run.mkdir(parents=True, exist_ok=False)
     status = {"stage": "team", "target": str(target), "state": "running",
               "registry": "not_implemented", "accepted_runs": [str(path) for path in accepted_runs]}
+    if configuration_sha256 is not None:
+        status["configuration_sha256"] = configuration_sha256
     try:
         with memory_lock(target):
             before = read_memory(target, "knowledge")
@@ -133,7 +153,11 @@ def consolidate_team_memory(target: Path, accepted_runs: list[Path], run: Path,
                 if read_accepted_knowledge(source) != (metadata, files):
                     raise RuntimeError("Источник принятых знаний изменился во время объединения.")
             if after != before:
-                publish_memory(target, before, after, "knowledge", run)
+                if configured:
+                    entries = tuple(sorted(before.keys() | after.keys()))
+                    FileMemoryStore(target, entries).publish(before, after, run)
+                else:
+                    publish_memory(target, before, after, "knowledge", run)
             elif read_memory(target, "knowledge") != before:
                 raise RuntimeError("Командная память изменилась во время объединения.")
             status["state"] = "published" if after != before else "unchanged"

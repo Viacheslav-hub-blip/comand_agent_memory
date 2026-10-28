@@ -22,6 +22,7 @@ from typing import Callable, TYPE_CHECKING
 from codex_client import run_codex
 from memory_pipeline import ROOT
 from run_reports import write_stage_report
+from command_agent_memory.memory.store import FileMemoryStore, MemoryLayout
 
 if TYPE_CHECKING:
     from replay_evaluation import ReplayScenario
@@ -44,14 +45,18 @@ class MemoryProposal:
     run: Path
     before: dict[str, bytes]
     after: dict[str, bytes]
+    layout: MemoryLayout | None = None
 
 
-def read_memory(directory: Path, stage: str) -> dict[str, bytes]:
+def read_memory(directory: Path, stage: str, layout: MemoryLayout | None = None) -> dict[str, bytes]:
     """Читает память; вход — каталог и этап, выход — относительные пути и байты.
 
     Для personal читает AGENTS.md, USER_PREFERENCES.md, user_llm_wiki и knowledge.
     Для knowledge читает весь каталог. Ссылки и reparse points не допускаются.
+    Если задан layout, читает только перечисленные в нём пути внешней памяти.
     """
+    if layout is not None:
+        return FileMemoryStore(directory, layout.entries).snapshot()
     if directory.exists() or directory.is_symlink():
         attributes = getattr(directory.lstat(), "st_file_attributes", 0)
         if directory.is_symlink() or attributes & 0x400:
@@ -113,12 +118,16 @@ def memory_lock(target: Path):
 
 
 def publish_memory(target: Path, before: dict[str, bytes], after: dict[str, bytes],
-                   stage: str, run: Path) -> None:
+                   stage: str, run: Path, layout: MemoryLayout | None = None) -> None:
     """Переносит принятую память; вход — цель, две версии, этап и журнал, выход — None.
 
     Оригиналы сохраняет в backup. При исключении восстанавливает перенесённые
     элементы. Это не атомарная публикация нескольких файлов для читателей.
+    layout включает FileMemoryStore и разрешает явно настроенный внешний корень.
     """
+    if layout is not None:
+        FileMemoryStore(target, layout.entries).publish(before, after, run)
+        return
     write_snapshot(run / "publish", after)
     if read_memory(target, stage) != before:
         raise RuntimeError("Действующая память изменилась во время обработки; перенос отменён.")
@@ -165,33 +174,43 @@ def read_rules(skill_path: Path) -> str:
 
 def prepare_memory(target: Path, stage: str, materials: str, skill_path: Path,
                    executable: str, model: str, run: Path,
-                   knowledge_materials: str = "", runner: Callable | None = None) -> MemoryProposal:
+                   knowledge_materials: str = "", runner: Callable | None = None,
+                   layout: MemoryLayout | None = None, runtime=None) -> MemoryProposal:
     """Принимает память, этап, материалы, skill, CLI, модель и каталог; возвращает предложение.
 
     run уже создан вызывающим кодом, который держит блокировку target.
     Для personal materials содержит контекст, knowledge_materials — решения.
     Консолидатор знаний получает оба текста целиком.
     Оба консолидатора меняют одну копию; действующая память не изменяется.
+    layout задаёт пути вместо стандартной структуры; runtime выбирает модель
+    каждого консолидатора и добавляет общие пожелания пользователя.
     """
     runner = runner or run_codex
-    before = read_memory(target, stage)
+    before = read_memory(target, stage, layout)
     write_snapshot(run / "before", before)
     draft = run / "workspace/memory"
     write_snapshot(draft, before)
     (run / "reviews").mkdir()
     rules = read_rules(skill_path)
+    if layout is not None:
+        rules = layout.instructions() + "\n\n" + rules
     tasks = []
-    if materials:
+    if materials and (layout is None or layout.personal):
         scope = (
             "AGENTS.md, USER_PREFERENCES.md и user_llm_wiki/"
             if stage == "personal" else "файлы каталога"
         )
+        if layout is not None:
+            scope = ", ".join(layout.personal)
         tasks.append((draft, scope, rules, materials, "consolidation"))
     if stage == "personal":
         knowledge_rules = read_rules(KNOWLEDGE_SKILL)
+        if layout is not None:
+            knowledge_rules = layout.instructions() + "\n\n" + knowledge_rules
         knowledge_text = "\n\n".join(part for part in (materials, knowledge_materials) if part)
-        if knowledge_text:
-            tasks.append((draft / "knowledge", "файлы каталога", knowledge_rules,
+        if knowledge_text and (layout is None or layout.knowledge):
+            tasks.append((draft / "knowledge" if layout is None else draft,
+                          "файлы каталога" if layout is None else ", ".join(layout.knowledge), knowledge_rules,
                           knowledge_text, "consolidation-knowledge"))
         rules = (
             "Правила для AGENTS.md, USER_PREFERENCES.md и user_llm_wiki/:\n\n" + rules
@@ -228,19 +247,31 @@ def prepare_memory(target: Path, stage: str, materials: str, skill_path: Path,
         )
         report_name = "personal" if stage == "personal" and name == "consolidation" else "knowledge"
         title = "Личные правила, предпочтения и контекст" if report_name == "personal" else "Определения, cases и skills"
-        previous = read_memory(draft, stage)
+        previous = read_memory(draft, stage, layout)
         write_stage_report(run, report_name, title, "running", "Консолидатор выполняет обработку.")
         try:
-            reply = runner(executable, model, prompt, run / "workspace", run / name, writable=True)
+            task_runner = (runtime.runner("consolidation" if name == "consolidation" else "knowledge")
+                           if runtime is not None else runner)
+            reply = task_runner(executable, model, prompt, run / "workspace", run / name, writable=True)
+            if layout is not None:
+                current = read_memory(draft, stage, layout)
+                unexpected = set(read_memory(draft, "knowledge")) - set(current)
+                if unexpected:
+                    raise RuntimeError(f"Консолидатор создал файлы вне настроенной памяти: {sorted(unexpected)}")
+                allowed = layout.personal if name == "consolidation" else layout.knowledge
+                changed = {path for path in previous.keys() | current.keys()
+                           if previous.get(path) != current.get(path)}
+                if any(not any(Path(path).is_relative_to(Path(entry)) for entry in allowed) for path in changed):
+                    raise RuntimeError("Консолидатор изменил память вне области своего этапа.")
         except BaseException as error:
             write_stage_report(run, report_name, title, "failed", str(error), previous,
-                               read_memory(draft, stage), {"Журнал": run / f"{name}.jsonl"})
+                               read_memory(draft, stage, layout), {"Журнал": run / f"{name}.jsonl"})
             raise
         write_stage_report(run, report_name, title, "completed", reply, previous,
-                           read_memory(draft, stage), {"Ответ агента": run / f"{name}.last.txt"})
-    after = read_memory(draft, stage)
+                           read_memory(draft, stage, layout), {"Ответ агента": run / f"{name}.last.txt"})
+    after = read_memory(draft, stage, layout)
     write_snapshot(run / "before-review", after)
-    return MemoryProposal(target, stage, run, before, after)
+    return MemoryProposal(target, stage, run, before, after, layout)
 
 
 def is_review_decision(value: object) -> bool:
@@ -302,14 +333,16 @@ def review_memory(proposal: MemoryProposal, executable: str, model: str,
     runner = runner or run_codex
     run = proposal.run
     draft = run / "workspace/memory"
-    if read_memory(draft, proposal.stage) != proposal.after:
+    if read_memory(draft, proposal.stage, proposal.layout) != proposal.after:
         raise RuntimeError("Предложенная копия изменилась до ревью.")
-    if read_memory(run / "before", proposal.stage) != proposal.before:
+    if read_memory(run / "before", proposal.stage, proposal.layout) != proposal.before:
         raise RuntimeError("Исходный снимок изменился; ревью отменено.")
     scope = (
         "AGENTS.md, USER_PREFERENCES.md, user_llm_wiki/ и knowledge/"
         if proposal.stage == "personal" else "все файлы каталога"
     )
+    if proposal.layout is not None:
+        scope = proposal.layout.instructions()
     changes = {
         "added": sorted(proposal.after.keys() - proposal.before.keys()),
         "changed": sorted(path for path in proposal.before.keys() & proposal.after.keys()
@@ -347,12 +380,14 @@ def review_memory(proposal: MemoryProposal, executable: str, model: str,
         decision["summary"] + "\n\n" + json.dumps(decision["findings"], ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    if (read_memory(run / "before", proposal.stage) != proposal.before
-            or read_memory(run / "before-review", proposal.stage) != proposal.after):
+    if (read_memory(run / "before", proposal.stage, proposal.layout) != proposal.before
+            or read_memory(run / "before-review", proposal.stage, proposal.layout) != proposal.after):
         raise RuntimeError("Исходные снимки изменились во время ревью.")
-    after = read_memory(draft, proposal.stage)
+    after = read_memory(draft, proposal.stage, proposal.layout)
+    if proposal.layout is not None and set(read_memory(draft, "knowledge")) - set(after):
+        raise RuntimeError("Ревьюер создал файлы вне настроенной памяти.")
     write_snapshot(run / "after", after)
-    reviewed = MemoryProposal(proposal.target, proposal.stage, run, proposal.before, after)
+    reviewed = MemoryProposal(proposal.target, proposal.stage, run, proposal.before, after, proposal.layout)
     result = {"decision": "accepted", "reviews": 1, "review": str(prefix.with_suffix(".json")),
               "summary": decision["summary"]}
     if decision["decision"] != "accepted" or decision["findings"]:
@@ -367,7 +402,8 @@ def consolidate_with_review(target: Path, stage: str, materials: str, skill_path
                             replay_scenario: "ReplayScenario | None" = None,
                             agent_python: Path | None = None, user_id: str = "replay",
                             replay_requested: bool = False, replay_context: Path | None = None,
-                            runner: Callable | None = None) -> None:
+                            runner: Callable | None = None,
+                            layout: MemoryLayout | None = None, runtime=None) -> None:
     """Принимает память, материалы, skills и модели; переносит принятую копию, возвращает None.
 
     Личный этап готовит правила, контекст и knowledge в одной копии. Блокировка
@@ -376,20 +412,32 @@ def consolidate_with_review(target: Path, stage: str, materials: str, skill_path
     При нехватке данных перенос разрешает ревью; иначе выполняется диалог и
     требуется candidate. user_id задаёт владельца принятого снимка. Отчёты
     и хеши версии сохраняются в run/report/ и status.json.
+    layout разрешает настроенные пути внешнего агента; runtime маршрутизирует
+    модельные этапы и сохраняет снимок настроек и пожеланий.
     """
     custom_runner = runner
     runner = runner or run_codex
-    target, run = target.resolve(), run.resolve()
+    target = target.resolve() if layout is None else target.absolute()
+    run = run.resolve()
     replay_enabled = replay_requested or replay_scenario is not None
     if replay_enabled and stage != "personal":
         raise ValueError("Проверочный прогон применяется только к личному этапу.")
-    if (stage not in ("personal", "knowledge") or target == ROOT or run == ROOT
-            or not target.is_relative_to(ROOT) or not run.is_relative_to(ROOT)
-            or target.is_relative_to(run) or run.is_relative_to(target)):
+    legacy_invalid = layout is None and (target == ROOT or run == ROOT
+                      or not target.is_relative_to(ROOT) or not run.is_relative_to(ROOT)
+                      or target.is_relative_to(run) or run.is_relative_to(target))
+    configured_invalid = layout is not None and any(
+        (target / name).is_relative_to(run) or run.is_relative_to(target / name) for name in layout.entries)
+    if stage not in ("personal", "knowledge") or legacy_invalid or configured_invalid:
         raise RuntimeError("Память и материалы запуска должны быть раздельными каталогами внутри проекта.")
     run.mkdir(parents=True, exist_ok=False)
+    if runtime is not None:
+        runtime.save(run / "configuration")
     status = {"stage": stage, "target": str(target), "user_id": str(user_id), "state": "running",
               "replay_status": "pending" if replay_enabled else "not_requested"}
+    if layout is not None:
+        status["memory_layout"] = {"personal": list(layout.personal), "knowledge": list(layout.knowledge)}
+    if runtime is not None:
+        status["configuration_sha256"] = runtime.fingerprint()
     try:
         with memory_lock(target):
             if replay_context is not None:
@@ -405,13 +453,17 @@ def consolidate_with_review(target: Path, stage: str, materials: str, skill_path
             prepare_arguments = (
                 target, stage, materials, skill_path, executable, model, run, knowledge_materials,
             )
-            proposal = (prepare_memory(*prepare_arguments, runner=runner)
-                        if custom_runner is not None else prepare_memory(*prepare_arguments))
+            if layout is not None or runtime is not None:
+                proposal = prepare_memory(*prepare_arguments, runner=runner, layout=layout, runtime=runtime)
+            else:
+                proposal = (prepare_memory(*prepare_arguments, runner=runner)
+                            if custom_runner is not None else prepare_memory(*prepare_arguments))
             before_review = proposal.after
             write_stage_report(run, "review", "Проверка и исправления", "running", "Ревьюер проверяет копию памяти.")
             proposal, decision = (
-                review_memory(proposal, executable, review_model or model, runner=runner)
-                if custom_runner is not None
+                review_memory(proposal, executable, review_model or model,
+                              runner=runtime.runner("review") if runtime is not None else runner)
+                if custom_runner is not None or runtime is not None
                 else review_memory(proposal, executable, review_model or model)
             )
             write_stage_report(run, "review", "Проверка и исправления", decision["decision"],
@@ -450,7 +502,8 @@ def consolidate_with_review(target: Path, stage: str, materials: str, skill_path
                         )
                         evaluation = (evaluate_by_replay(
                             *evaluation_arguments, backend="dialogue", runner=runner,
-                        ) if custom_runner is not None else evaluate_by_replay(
+                            **({"runtime": runtime} if runtime is not None else {}),
+                        ) if custom_runner is not None or runtime is not None else evaluate_by_replay(
                             *evaluation_arguments, backend="dialogue",
                         ))
                     except BaseException:
@@ -466,7 +519,7 @@ def consolidate_with_review(target: Path, stage: str, materials: str, skill_path
             else:
                 write_stage_report(run, "replay", "Проверка решением задачи", "not_requested",
                                    "Проверка не запрошена. Принятие памяти основано на ревью.")
-            if read_memory(run / "after", stage) != proposal.after:
+            if read_memory(run / "after", stage, layout) != proposal.after:
                 raise RuntimeError("Проверяемая копия изменилась; перенос отменён.")
             if replay_context is not None and report_fingerprint(replay_context) != status["report_fingerprint"]:
                 raise RuntimeError("Аналитические отчёты изменились во время обработки; перенос отменён.")
@@ -483,8 +536,11 @@ def consolidate_with_review(target: Path, stage: str, materials: str, skill_path
                             "source": manifest.get("source"),
                         })
             if proposal.after != proposal.before:
-                publish_memory(target, proposal.before, proposal.after, stage, run)
-            elif read_memory(target, stage) != proposal.before:
+                if layout is not None:
+                    publish_memory(target, proposal.before, proposal.after, stage, run, layout)
+                else:
+                    publish_memory(target, proposal.before, proposal.after, stage, run)
+            elif read_memory(target, stage, layout) != proposal.before:
                 raise RuntimeError("Действующая память изменилась; результат устарел.")
             status["state"] = "published" if proposal.after != proposal.before else "unchanged"
     except BaseException as error:

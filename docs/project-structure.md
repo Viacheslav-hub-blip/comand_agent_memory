@@ -69,7 +69,11 @@ run_memory_pipeline.py принимает одно задание либо --use
 
 Новый исполнитель модели добавляется в adapters.registry через ModelAdapter.
 Чтение логов и выполнение модели остаются разными ответственностями.
-Внешние адаптеры Claude Code / GigaCode этой работой не добавлены.
+Подключения внешних агентов доступны через `--config`: источники Claude Code,
+Codex, GigaAgent, Phoenix, JSONL и SQLite описаны в [agent-connections.md](agent-connections.md).
+`configuration.py` задаёт модели этапов и пожелания; `history.py` содержит реестр
+источников; `memory/store.py` обновляет настроенные файлы внешней памяти;
+`connections.py` связывает их с существующей консолидацией и ревью.
 
 Прежние одношаговые функции оценки и отдельные ablation-команды остаются для
 исторических опытов. Основной CLI не предлагает force-replay, выбор replay-backend
