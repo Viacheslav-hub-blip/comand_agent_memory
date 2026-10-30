@@ -1,5 +1,5 @@
 # Локальные настройки и секреты
-settings.py
+local_settings/agent_settings.py
 .env
 .env.*
 !.env.example
@@ -9,6 +9,9 @@ settings.py
 venv/
 __pycache__/
 *.py[cod]
+*.egg-info/
+build/
+dist/
 .pytest_cache/
 
 # Настройки IDE и ОС

@@ -1,145 +1,236 @@
-# Память пользователя и команды
+# Command Agent Memory
 
-Основной цикл следует [утверждённой схеме](docs/conference-memory-flow.html):
-новые сессии → два анализа → личная консолидация → review → при включённой
-проверке диалог с новой памятью → сравнение → принятие → командное объединение.
+Конвейер личной и командной памяти AI-агентов. Он читает историю работы,
+выделяет контекст и процедуры, готовит изменения памяти в копии, проверяет их
+ревьюером и публикует принятую версию. При наличии сценария можно проверить
+память повторным решением задачи.
 
-Подключение рабочего агента через `--config` читает истории Claude Code, Codex,
-GigaAgent, Arize Phoenix, JSONL и SQLite и обновляет указанные пользователем
-файлы памяти, в том числе вне репозитория. Источник истории и состав памяти
-настраиваются независимо; новый источник или провайдер регистрируется отдельным модулем.
-Для каждого модельного этапа выбираются провайдер и модель; общий текстовый файл
-пожеланий добавляется к каждому запросу. Встроены исполнители OpenRouter и Codex CLI.
+История, модели этапов и хранилище памяти подключаются независимо.
+Другой агент или база добавляется адаптером; менять конвейер не требуется.
 
-```powershell
-python -X utf8 run_memory_pipeline.py --config docs/examples/agent-connection/connection.json --validate-only
-```
+## Установка и запуск
 
-Пример проверяется без ключей и моделей. Перед реальным запуском замените
-`YOUR_*_MODEL_ID` и пути на свои. [Настройки, поддерживаемые форматы и расширение](docs/agent-connections.md).
-
-Прежние команды SQLite/Codex без `--config` сохранены. Реестр подтверждений,
-pending и conflicts отложены. Командный этап объединяет уже принятые личные
-знания без отдельного агента-review и подключает общий снимок пользователям.
-
-## Основная команда
-
-Проверка входов без моделей и записи файлов:
+Требуется Python 3.11 или новее. Из каталога проекта:
 
 ```powershell
-python -X utf8 run_memory_pipeline.py --user-id 101 --workspace data/users/101 --source sqlite --validate-only
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -e .
+python -m command_agent_memory --config docs/examples/jsonl_to_file_memory/memory_pipeline.json --validate-only
 ```
 
-Рабочая область для SQLite должна содержать chat_logs.db. Для Codex используется
-существующий источник с явно выбранными проектами:
+Базовый пакет работает без сторонних Python-библиотек. Для исполнения через
+Codex нужен отдельно установленный и авторизованный Codex CLI.
+Для OpenRouter и диалоговой проверки:
 
 ```powershell
-python -X utf8 run_memory_pipeline.py --user-id slav4ik --workspace data/openrouter-runs/slav4ik --source codex --project jev_test --project offzone --validate-only
+python -m pip install -e ".[openrouter,replay]"
+$env:OPENROUTER_API_KEY = "ваш ключ"
 ```
 
-Уберите --validate-only только для реального запуска моделей. По умолчанию
-используется OpenRouter; нужны зависимости DeepAgents/LangChain и авторизация
-провайдера. Ключи в примерах не задаются. --backend codex выбирает существующий
-Codex-исполнитель анализа, консолидации и оценки.
+Для сжатых историй `.jsonl.zst` установите дополнение `.[zstandard]`.
+Драйвер внешней SQL-базы устанавливается отдельно.
 
---stage personal выполняет только личный цикл; по умолчанию --stage both
-включает и командное объединение. --knowledge-dir задаёт общий каталог.
-
-## Проверка новой памяти
-
-Флаг --evaluate-by-replay включает локальную проверку наличия данных. Если
-сценария, отдельных пользовательских реплик, исходных файлов или прежнего ответа
-нет, память принимается по review со статусом skipped. Модель не оценивает цену
-прогона. При достаточных данных выполняется диалог; тестировщик подтверждает
-конечную цель, после чего оценщик сравнивает результат с прежним.
+У проекта одна команда:
 
 ```powershell
-python -X utf8 run_memory_pipeline.py --user-id 101 --workspace data/users/101 --source sqlite --evaluate-by-replay --replay-scenario docs/examples/replay-anna/dialogue-scenario.json --validate-only
+command-agent-memory --config memory_pipeline.json --validate-only
+command-agent-memory --config memory_pipeline.json
+command-agent-memory --config memory_pipeline.json --evaluate-by-replay
 ```
 
-Для Codex полный диалоговый сценарий может быть собран автоматически из сохранённой
-истории и доступных файлов. Повреждённые материалы не маскируются под отсутствие
-данных. Решающий агент получает первую реплику и следующие выбранные реплики
-дословно; эталон доступен тестировщику и итоговому оценщику.
+Те же параметры принимает `python -m command_agent_memory`.
+`--validate-only` проверяет входы без моделей и записи памяти.
+Рабочий запуск обращается к выбранным моделям и публикует принятый результат.
+Пользовательские расширения выполняются как доверенный Python-код, включая импорт
+при validate-only; их автор должен соблюдать договор о чтении без записи.
 
-В основном CLI больше нет --force-replay, --replay-backend и --agent-python.
-Используйте Python того окружения, где установлены зависимости диалогового агента.
-
-## Несколько пользователей
-
-JSON-задания, пути относительно корня проекта:
+## Конфигурация
 
 ```json
-[
-  {"user_id": "101", "workspace": "data/users/101", "source": "sqlite"},
-  {"user_id": "102", "workspace": "data/users/102", "source": "sqlite"}
-]
+{
+  "defaults": {"provider": "codex", "model": "YOUR_MODEL_ID"},
+  "users": [
+    {
+      "user_id": "alice",
+      "workspace": "./runs/alice",
+      "source": {"type": "jsonl", "path": "./conversation_events.jsonl"},
+      "memory": {
+        "type": "files",
+        "root": "./agent-project",
+        "personal": ["AGENTS.md"],
+        "knowledge": ["notes"]
+      }
+    }
+  ]
+}
 ```
 
-```powershell
-python -X utf8 run_memory_pipeline.py --users users.json --validate-only
+Замените `YOUR_MODEL_ID` на доступную вам модель. Все относительные пути считаются
+от каталога конфигурации. `conversation_events.jsonl` содержит один объект на строку:
+
+```jsonl
+{"id":"1","session_id":"chat-1","role":"user","content":"Пиши документацию на русском."}
+{"id":"2","session_id":"chat-1","role":"assistant","content":"Принято."}
 ```
 
-Сначала проверяются задания всех участников. Затем выполняются независимые
-личные циклы и одно объединение принятых знаний. Области пользователей не
-должны пересекаться. Принятие без прогона хранится отдельно от успешного прогона.
+Память можно хранить в SQLite, заменив блок `memory`:
 
-Завершённые чаты повторно не анализируются. При обычном запуске с неизменными
-отчётами и памятью используются уже принятые личные и командные результаты.
-Явно запрошенная проверка --evaluate-by-replay запускает новый личный цикл,
-чтобы не подменять его прежним принятием без проверки.
-
-## Отдельные этапы
-
-Существующие команды сохранены как тонкие точки входа:
-
-```powershell
-python analyze_chats_openrouter.py --user-id 101 --workspace data/users/101 --validate-only
-python consolidate_reports_openrouter.py --user-id 101 --workspace data/users/101 --stage personal --validate-only
-python consolidate_reports_openrouter.py --stage knowledge --accepted-run data/consolidation-runs/ID/personal --validate-only
+```json
+"memory": {
+  "type": "sqlite",
+  "path": "./memory/alice.db",
+  "personal": ["AGENTS.md"],
+  "knowledge": ["notes"]
+}
 ```
 
---accepted-run можно повторить для нескольких участников. Командный вход проверяет
-state=published/unchanged, владельца, основание принятия и хеши снимка after/.
-Исходные аналитические отчёты командному консолидатору больше не передаются.
-Личные AGENTS.md, USER_PREFERENCES.md и user_llm_wiki/ не экспортируются.
+В SQLite используется таблица `memory_documents(path, content)`.
+Конвейер работает с локальной копией документов и сохраняет результат в БД.
+Чтение этой БД самим рабочим агентом подключается средствами его SDK.
+Для агентов, читающих файлы инструкций, используйте файловую память.
 
-Командный консолидатор работает в копии и сам сообщает accepted либо оставшиеся
-проблемы. При неразрешённом противоречии сохраняется прежняя общая версия.
-Это временный режим без постоянного учёта подтверждений и без голосования.
-После публикации team_knowledge/ обновляется у перечисленных владельцев;
-agent_runtime подключает индекс и каталог навыков в новом сеансе.
+Модели отдельных этапов переопределяются через `stages`; `wishes_file` добавляет
+общие пожелания к каждому запросу. Ключи передавайте через окружение.
+Необязательные локальные настройки находятся в `local_settings/agent_settings.py`;
+пример — `local_settings/agent_settings.example.py`. Этот файл не входит в пакет и Git.
 
-## Структура и данные
+## Схема работы
 
-Повторно используемый код находится в command_agent_memory/:
+```mermaid
+flowchart TD
+    History["HistorySource: история агента / SQL / JSONL"] --> Events["Единые события HistoryEvent"]
+    Events --> Context["Анализ контекста"]
+    Events --> Procedures["Анализ процедур"]
+    Context --> Draft["Копия памяти"]
+    Procedures --> Draft
+    Store["MemoryStore: files / sqlite / свой backend"] -->|"snapshot"| Draft
+    Draft --> Review["Ревью и исправления"]
+    Review --> Replay{"Запрошен replay и есть данные?"}
+    Replay -->|"Да"| Evaluate["Диалог и сравнение результатов"]
+    Replay -->|"Нет"| Publish["Проверка исходной версии и публикация"]
+    Evaluate -->|"Принят candidate"| Publish
+    Publish --> Store
+    Publish --> Team["Необязательно: объединение принятых знаний команды"]
+```
 
-- analysis/ — отбор сессий, анализ и версия хранилища отчётов.
-- memory/ — личная память, принятие, командное объединение и CLI этапов.
-- evaluation/ — сценарий, диалог и сравнение результатов.
-- pipeline.py — полный цикл одного или нескольких пользователей.
-- adapters/, runs/, synthetic/ — прежние исполнители, каталоги и тестовые входы.
+При нехватке replay-данных сохраняется `skipped`: память принимается по ревью.
+При выполненном replay публикация требует выбора `candidate`.
+`"team":{"root":"./shared-memory"}` включает командное объединение знаний;
+личные правила в него не передаются. Командная память публикуется в файлы.
 
-Корневые reviewed_consolidation.py и replay_evaluation.py сохраняют прежние
-импорты через тот же модуль подсистемы. Отдельные экспериментальные команды
-run_dialogue_replay.py и run_memory_ablation.py сохраняют свою методику измерений
-и не являются дополнительными этапами основного конвейера.
+Файловая публикация сохраняет backup и откатывает изменения при ошибке,
+но несколько файлов не меняются атомарно для внешнего читателя.
+SQLite-публикация выполняется одной транзакцией с проверкой исходного снимка.
+Неизменные принятые результаты используются повторно.
 
-Истории: workspace/chat_logs.db. Анализ: workspace/raw/chat-reports-*/.
-Личная память: AGENTS.md, USER_PREFERENCES.md, user_llm_wiki/, knowledge/.
-Общие знания: knowledge/ либо --knowledge-dir. Журналы: data/consolidation-runs/.
-В status.json хранятся версии входов и снимка; это технический журнал публикации,
-а не реестр независимых подтверждений.
+## Что поддерживается
 
-## Проверки
+| Область | Встроено | Расширение |
+| --- | --- | --- |
+| История | Claude Code, Codex rollout, GigaAgent/LangGraph, Phoenix, JSONL, SQLite | `HistorySource` |
+| SQL-история | DB-API драйвер, свой SELECT и параметры | Драйвер БД; для NoSQL — собственный источник |
+| Модели | Codex CLI, OpenRouter | `ModelAdapter` |
+| Память | Файлы/каталоги, SQLite | `MemoryStore` |
+
+Для произвольной системы нужен адаптер или поддерживаемый экспорт.
+Автоматического распознавания любого агента или базы нет.
+
+## Структура
+
+```text
+command_agent_memory/
+  __main__.py                    # разбор параметров командной строки
+  memory_pipeline.py             # весь цикл обновления памяти
+  pipeline_config.py             # чтение настроек и выбор моделей этапов
+  conversation_history.py        # чтение и нормализация диалогов
+  sql_history_source.py          # чтение диалогов из SQL-базы
+  project_paths.py               # поиск файлов проекта и инструкций
+  run_reports.py                 # каталоги запусков, отчёты и версии входов
+  model_providers/               # вызовы моделей через внешние системы
+    __init__.py                  # контракт исполнителя и регистрация провайдеров
+    codex_cli.py                 # запуск модели через Codex CLI
+    openrouter_api.py            # вызовы OpenRouter
+  memory/                        # подготовка и сохранение новой памяти
+    personal_memory.py           # личная память: копия, ревью и публикация
+    team_memory.py               # объединение знаний участников команды
+    file_storage.py              # чтение и запись файлов памяти
+    sqlite_storage.py            # хранение документов памяти в SQLite
+    storage_registry.py          # контракт хранилища и регистрация реализаций
+  memory_evaluation/             # проверка качества новой памяти
+    scenario_messages.py         # чтение исходных реплик сценария
+    dialogue_runner.py           # диалог решающего агента и тестировщика
+    replay_evaluation.py          # проверочный прогон и сравнение результатов
+  agent_execution/               # выполнение диалогов и файловых команд
+    conversation_runner.py       # сборка агента и сохранение диалога
+    local_shell.py               # локальные команды и файловые инструменты
+  skills/                        # встроенные пакеты в формате Agent Skills
+    context-analysis/            # извлечение контекста диалога
+      SKILL.md
+      references/examples.md
+    procedure-analysis/          # извлечение решений и процедур
+      SKILL.md
+      references/examples.md
+    personal-memory-consolidation/  # обновление личной памяти
+      SKILL.md
+      references/examples.md
+    knowledge-consolidation/     # объединение предметных знаний
+      SKILL.md
+      references/skill-authoring.md
+    memory-review/               # проверка изменений памяти
+      SKILL.md
+      references/examples.md
+    replay-evaluation/           # сравнение результатов задачи
+      SKILL.md
+local_settings/                  # локальные параметры агента и их шаблон
+specifications/                  # требования к жизненному циклу памяти
+project_archives/                # архив исследовательского кода и материалов
+docs/                            # руководства и примеры подключений
+tests/                           # автоматические проверки
+```
+
+Каждый скил содержит `SKILL.md` с полями `name` и `description`; `name` совпадает
+с именем каталога и использует строчные буквы и дефисы. Дополнительные материалы
+располагаются в `references/` соответствующего скила. Загрузчик
+`get_skill_path(name, resource="SKILL.md")` разрешает пути внутри выбранного пакета.
+Встроенные скилы включаются в wheel и доступны после установки приложения.
+
+Структура соответствует [Agent Skills](https://agentskills.io/specification)
+и [формату скилов Hermes](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills).
+В Hermes основной пользовательский каталог — `~/.hermes/skills/`, проектные каталоги —
+`.hermes/skills/` и `.agents/skills/`. Наши встроенные пакеты можно подключить через
+`skills.external_dirs`, указав абсолютный путь к `command_agent_memory/skills`.
+Это отдельная настройка Hermes; конвейер загружает скилы своим загрузчиком.
+
+- [Настройка источников и этапов](docs/configuring_agents_and_databases.md).
+- [Контракты и добавление адаптеров](docs/adding_integrations.md).
+- [Диалоговая проверка](docs/evaluating_memory_with_replay.md).
+- [Запуск в PyCharm](docs/running_in_pycharm.md).
+
+Исторический код и исследовательские документы сохранены одним архивом в
+`project_archives/research-code-before-final-cleanup.zip` и не входят в рабочий пакет.
+`data/`, `tmp/` и другие локальные результаты не являются исходным кодом пакета.
+
+## Проверки и сборка
 
 ```powershell
 python -X utf8 -m unittest discover -s tests
+python -m pip wheel . --no-deps --wheel-dir dist
 ```
 
-Новые сквозные тесты используют имитации исполнителей и запрещают сетевые соединения.
+Модельные этапы в тестах используют имитации. Доступ к вашим моделям,
+внешним серверам и конкретным SQL-драйверам проверяется в вашем окружении.
 
-- [Текущая структура](docs/project-structure.md).
-- [Целевая спецификация](openspec/specs/single-user-memory/spec.md).
-- [Диалоговая проверка](docs/dialogue-replay.md).
-- [Исторические результаты на 26 октября](docs/project-state-2026-10-26.md).
+
+Каталоги с короткими служебными названиями не содержат реализацию конвейера:
+
+| Каталог | Что находится внутри |
+| --- | --- |
+| knowledge/ | Сохранённые знания проекта: wiki, случаи и skills |
+| data/ | Результаты локальных запусков |
+| conversation_history/ | Локальные выгрузки диалогов |
+| user_workspace/ | Рабочие файлы локального агента |
+| large_tool_results/ | Сохранённые объёмные ответы инструментов |
+| tmp/ | Временные файлы и проверки |
+| build/, *.egg-info/ | Автоматические результаты сборки Python-пакета |
+| .venv/, __pycache__/, .pytest_cache/ | Окружение Python и кэш |

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "command-agent-memory"
+version = "0.1.0"
+description = "Расширяемый конвейер личной и командной памяти агентов"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+openrouter = ["deepagents>=0.6.11,<1", "langchain-openai>=1.2.2,<2"]
+replay = ["deepagents>=0.6.11,<1", "langchain-openai>=1.2.2,<2"]
+zstandard = ["zstandard>=0.22,<1"]
+
+[project.scripts]
+command-agent-memory = "command_agent_memory.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["command_agent_memory*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+command_agent_memory = ["skills/*/SKILL.md", "skills/*/references/*.md"]

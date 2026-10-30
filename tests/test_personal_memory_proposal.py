@@ -11,19 +11,16 @@ test_only_knowledge_preserves_personal_rules — вход без личных п
 test_knowledge_publication_failure_restores_all_entries — восстановление
 (вложенная fail_on_knowledge); test_review_changes_are_published — исправленная копия;
 test_baseline_change_is_not_published — подмена исходного снимка;
-test_cli_accepts_report_without_sections — свободное оформление отчёта.
 test_reports_record_writer_and_reviewer_changes — отчёты отдельных изменений.
 """
 import json
 import os
 from pathlib import Path
-import subprocess
-import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
-import reviewed_consolidation as pipeline
+import command_agent_memory.memory.personal_memory as pipeline
 
 
 class PersonalMemoryProposalTests(unittest.TestCase):
@@ -51,7 +48,7 @@ class PersonalMemoryProposalTests(unittest.TestCase):
             path = self.target / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(content)
-        self.skill = pipeline.ROOT / "agents/consolidation/skills/consolidation/SKILL.md"
+        self.skill = pipeline.ROOT / "command_agent_memory/skills/personal-memory-consolidation/SKILL.md"
         self.writer_calls = []
         self.review_count = 0
         self.fail_knowledge = False
@@ -223,22 +220,6 @@ class PersonalMemoryProposalTests(unittest.TestCase):
         self.change_baseline = True
         with self.assertRaisesRegex(RuntimeError, "Исходные снимки"):
             self.execute()
-        self.assertEqual(pipeline.read_memory(self.target, "personal"), self.before)
-
-    def test_cli_accepts_report_without_sections(self):
-        """Без входов проверяет запуск с произвольно оформленным отчётом; возвращает None."""
-        reports = self.base / "reports"
-        reports.mkdir()
-        (reports / "session-1.md").write_text(
-            "Определение показателя без заданных разделов.\n", encoding="utf-8",
-        )
-        result = subprocess.run(
-            [sys.executable, "-X", "utf8", str(pipeline.ROOT / "consolidate_reports_codex.py"),
-             "--user-id", "101", "--workspace", str(self.target), "--reports-dir", str(reports),
-             "--stage", "personal", "--validate-only"],
-            cwd=pipeline.ROOT, capture_output=True, text=True, encoding="utf-8", check=True,
-        )
-        self.assertIn("Этапы: personal", result.stdout)
         self.assertEqual(pipeline.read_memory(self.target, "personal"), self.before)
 
 

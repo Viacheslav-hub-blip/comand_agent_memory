@@ -14,9 +14,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from memory_pipeline import ROOT
-from replay_evaluation import ReplayScenario, load_replay_scenario
-from run_dialogue_replay import prepare_workspace
+from command_agent_memory.project_paths import ROOT
+from command_agent_memory.memory_evaluation.replay_evaluation import ReplayScenario, load_replay_scenario
 
 
 HAS_RUNTIME = bool(importlib.util.find_spec("langchain_core") and importlib.util.find_spec("deepagents"))
@@ -27,47 +26,14 @@ class DialogueScenarioTests(unittest.TestCase):
 
     def test_first_message_is_exact_source(self):
         """Загружает сценарий Анны; подтверждает четыре отдельные исходные реплики."""
-        from command_agent_memory.synthetic import load_dialogues
 
-        scenario = load_replay_scenario(ROOT / "docs/examples/replay-anna/dialogue-scenario.json")
-        original = load_dialogues(ROOT)[0]["messages"]
-        self.assertEqual(scenario.messages, tuple(original))
-        self.assertEqual(scenario.request, original[0])
-        self.assertNotIn(original[1], scenario.request)
-
-    def test_workspace_contains_only_selected_materials(self):
-        """Копирует входы и память; проверяет отсутствие истории, эталона и старых результатов."""
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            inputs, memory, team = root / "inputs", root / "memory", root / "team"
-            inputs.mkdir()
-            memory.mkdir()
-            team.mkdir()
-            (inputs / "data.csv").write_text("value\n1", encoding="utf-8")
-            (memory / "AGENTS.md").write_text("Правило", encoding="utf-8")
-            (memory / "chat_logs.db").write_bytes(b"old chat")
-            (memory / "answer.md").write_text("старый результат", encoding="utf-8")
-            (team / "INDEX.md").write_text("Команда", encoding="utf-8")
-            prepare_workspace(root / "full", inputs, memory, team)
-            prepare_workspace(root / "none", inputs)
-            self.assertTrue((root / "full/AGENTS.md").is_file())
-            self.assertTrue((root / "full/team_knowledge/INDEX.md").is_file())
-            self.assertFalse((root / "full/chat_logs.db").exists())
-            self.assertFalse((root / "full/answer.md").exists())
-            self.assertEqual(list((root / "none").iterdir()), [root / "none/inputs"])
-
-    def test_nested_team_knowledge_is_connected_at_expected_root(self):
-        """Копирует командный снимок с knowledge/; подтверждает рабочий путь индекса."""
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            inputs, memory, team = root / "inputs", root / "memory", root / "team"
-            inputs.mkdir()
-            memory.mkdir()
-            (team / "knowledge/skills/process").mkdir(parents=True)
-            (team / "knowledge/INDEX.md").write_text("Командный индекс", encoding="utf-8")
-            prepare_workspace(root / "full", inputs, memory, team)
-            self.assertTrue((root / "full/team_knowledge/INDEX.md").is_file())
-            self.assertTrue((root / "full/team_knowledge/skills/process").is_dir())
+        scenario = load_replay_scenario(ROOT / "docs/examples/reconciliation_replay/dialogue_scenario.json")
+        source = (ROOT / "docs/examples/synthetic_team_dialogues/chats/01-anna-reconciliation.md").read_text(encoding="utf-8")
+        self.assertEqual(len(scenario.messages), 4)
+        for message in scenario.messages:
+            self.assertIn("```text\n" + message + "\n```", source)
+        self.assertEqual(scenario.request, scenario.messages[0])
+        self.assertNotIn(scenario.messages[1], scenario.request)
 
 
 class ScriptedSubject:
@@ -98,8 +64,8 @@ class DialogueReplayTests(unittest.TestCase):
 
     def setUp(self):
         """Создаёт чистую область, эталон и имитации двух участников диалога."""
-        from command_agent_memory.evaluation import dialogue
-        from replay_worker import ReplayMetrics
+        from command_agent_memory.memory_evaluation import dialogue_runner as dialogue
+        from command_agent_memory.memory_evaluation.dialogue_runner import ReplayMetrics
 
         self.module = dialogue
         self.temporary = tempfile.TemporaryDirectory()
@@ -173,6 +139,21 @@ class DialogueReplayTests(unittest.TestCase):
         self.assertIsNone(initialization["system_prompt"])
         self.assertEqual(initialization["system_prompt_source"], "deepagents_default")
 
+    def test_absent_memory_paths_are_read_only_without_memory(self):
+        """Без памяти проверяет запрет создания отсутствующих AGENTS.md и skills."""
+        from command_agent_memory.agent_execution.local_shell import RobustLocalShellBackend
+
+        (self.workspace / "AGENTS.md").unlink()
+        self.execute(memory_enabled=False)
+        paths = self.factory_call.kwargs["read_only_paths"]
+        self.assertIn("/AGENTS.md", paths)
+        self.assertIn("/skills", paths)
+        backend = RobustLocalShellBackend(root_dir=self.workspace, virtual_mode=True, read_only_paths=paths)
+        self.assertIsNotNone(backend.write("/AGENTS.md", "Память").error)
+        self.assertIsNotNone(backend.write("/skills/process/SKILL.md", "Процесс").error)
+        self.assertFalse((self.workspace / "AGENTS.md").exists())
+        self.assertFalse((self.workspace / "skills").exists())
+
     def test_subject_failure_keeps_trace_and_metrics(self):
         """Прерывает ответ; подтверждает сохранение частичной трассы и отдельный статус сбоя."""
         self.subject.fail = True
@@ -233,12 +214,12 @@ class DialogueReplayTests(unittest.TestCase):
 
     def test_factory_initializes_memory_and_virtual_paths(self):
         """Собирает настоящий backend; проверяет память при инициализации и разрешение путей."""
-        from agent_runtime import create_agent
+        from command_agent_memory.agent_execution.conversation_runner import create_agent
 
         (self.workspace / "knowledge/skills").mkdir(parents=True)
         (self.workspace / "knowledge/INDEX.md").write_text("Индекс", encoding="utf-8")
         with patch("deepagents.create_deep_agent") as factory, patch("langchain_openai.ChatOpenAI"), patch(
-                "openrouter_client.openrouter_api_key", return_value="test-key"):
+                "command_agent_memory.model_providers.openrouter_api.openrouter_api_key", return_value="test-key"):
             create_agent(self.workspace, model_name="test")
             configured = factory.call_args.kwargs
             self.assertNotIn("system_prompt", configured)

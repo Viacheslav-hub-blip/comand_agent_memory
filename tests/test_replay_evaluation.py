@@ -8,22 +8,20 @@ test_failed_worker_preserves_memory, test_invalid_judge_preserves_memory,
 test_disabled_flag_does_not_run, test_review_rejection_does_not_run,
 test_replay_memory_change_is_not_published, test_reference_is_not_in_workspace,
 test_loader_rejects_overlapping_inputs, test_loader_requires_reference_answer,
-test_cli_accepts_missing_scenario — сценарии принятия и отказа.
+проверки отсутствующих данных — сценарии принятия и отказа.
 check_replay_data проверяется отсутствующим сценарием, отсутствием реплик и ошибкой чтения.
 Класс ReplayMetricsTests проверяет callbacks и токены.
-Прямые тесты assess_replay сохранены для прежней отдельной методики оценки стоимости.
 """
 import importlib.util
 import json
 from pathlib import Path
 import subprocess
-import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
-import replay_evaluation as replay
-import reviewed_consolidation as pipeline
+import command_agent_memory.memory_evaluation.replay_evaluation as replay
+import command_agent_memory.memory.personal_memory as pipeline
 
 
 class ReplayEvaluationTests(unittest.TestCase):
@@ -72,7 +70,7 @@ class ReplayEvaluationTests(unittest.TestCase):
             {"choice": "candidate", "summary": "Новый результат лучше"},
         )
 
-    def prepare(self, target, stage, materials, skill_path, executable, model, run, knowledge_materials):
+    def prepare(self, target, stage, materials, instructions_path, executable, model, run, knowledge_materials):
         """Принимает параметры подготовки; создаёт предложение без LLM, возвращает MemoryProposal."""
         pipeline.write_snapshot(run / "before", self.before)
         pipeline.write_snapshot(run / "before-review", self.after)
@@ -126,15 +124,15 @@ class ReplayEvaluationTests(unittest.TestCase):
 
     def execute(self, enabled=True, scenario_missing=False):
         """Принимает флаг и наличие сценария; выполняет целевой личный цикл без моделей."""
-        skill = pipeline.ROOT / "agents/consolidation/skills/consolidation/SKILL.md"
+        skill = pipeline.ROOT / "command_agent_memory/skills/personal-memory-consolidation/SKILL.md"
         with patch.object(pipeline, "prepare_memory", side_effect=self.prepare):
             with patch.object(pipeline, "review_memory", side_effect=self.review):
-                with patch("command_agent_memory.evaluation.dialogue.run_dialogue", side_effect=self.dialogue):
+                with patch("command_agent_memory.memory_evaluation.dialogue_runner.run_dialogue", side_effect=self.dialogue):
                     with patch.object(replay, "run_codex", side_effect=self.judge):
                         pipeline.consolidate_with_review(
                             self.target, "personal", "Сведения", skill, "codex", "test", self.run,
                             replay_scenario=self.scenario if enabled and not scenario_missing else None,
-                            agent_python=Path(sys.executable), user_id="101", replay_requested=enabled,
+                            user_id="101", replay_requested=enabled,
                         )
 
     def test_candidate_publishes(self):
@@ -160,9 +158,9 @@ class ReplayEvaluationTests(unittest.TestCase):
             self.assertTrue(kwargs["memory_enabled"])
             self.worker(["--workspace", str(workspace), "--result", str(result)])
 
-        with patch("command_agent_memory.evaluation.dialogue.run_dialogue", side_effect=dialogue):
-            decision = replay.evaluate_by_replay(proposal, scenario, "", "test-model", Path(sys.executable),
-                                                 "101", backend="dialogue", runner=self.judge)
+        with patch("command_agent_memory.memory_evaluation.dialogue_runner.run_dialogue", side_effect=dialogue):
+            decision = replay.evaluate_by_replay(proposal, scenario, "", "test-model",
+                                                 "101", runner=self.judge)
         self.assertEqual(decision["choice"], "candidate")
         self.assertEqual(self.worker_calls, 1)
         self.assertEqual(self.judge_calls, 1)
@@ -252,24 +250,6 @@ class ReplayEvaluationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "answer.md"):
             replay.load_replay_scenario(scenario)
 
-    def test_cli_accepts_missing_scenario(self):
-        """Без входов проверяет разрешение оценки без сценария, без запуска моделей; возвращает None."""
-        reports = self.target / "raw/chat-reports-codex/session-one"
-        reports.mkdir(parents=True)
-        (reports / "context.md").write_text("Контекст", encoding="utf-8")
-        (reports / "procedures.md").write_text("Опыт", encoding="utf-8")
-        result = subprocess.run(
-            [sys.executable, "-X", "utf8", str(pipeline.ROOT / "consolidate_reports_codex.py"),
-             "--user-id", "101", "--workspace", str(self.target), "--evaluate-by-replay", "--validate-only"],
-            cwd=pipeline.ROOT, capture_output=True, text=True, encoding="utf-8",
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("возможен пропуск", result.stdout)
-
-
-
-
-
 
     def test_missing_scenario_is_accepted_by_review(self):
         """Проверяет принятие по review без данных; возвращает None."""
@@ -308,47 +288,6 @@ class ReplayEvaluationTests(unittest.TestCase):
         self.assertEqual(scenario.reference_metrics["duration_seconds"], 18000)
         self.assertFalse(scenario.inputs.exists())
 
-    def test_assessor_reads_saved_evidence(self):
-        """Без входов проверяет передачу измерений read-only оценщику и сохранение решения; возвращает None."""
-        self.run.mkdir()
-        proposal = pipeline.MemoryProposal(self.target, "personal", self.run, self.before, self.after)
-        with patch.object(replay, "run_codex", return_value=json.dumps({
-            "decision": "skip", "summary": "Выполнение длится часы",
-            "context": {"missing": ["Снимок базы"]}, "resources": {"estimate": "Длительный запрос"},
-        })) as assess:
-            result = replay.assess_replay(proposal, self.scenario, "codex", "test", self.root)
-        self.assertEqual(result["decision"], "skip")
-        self.assertEqual(result["context"]["missing"], ["Снимок базы"])
-        self.assertNotIn("writable", assess.call_args.kwargs)
-        information = json.loads((self.run / "replay-assessment/scenario.json").read_text(encoding="utf-8"))
-        self.assertEqual(information["request"], self.scenario.request)
-        self.assertEqual(information["reference"], str(self.reference))
-        self.assertEqual(information["materials"], str(self.run / "materials.md"))
-        self.assertTrue((self.run / "replay-assessment/decision.json").exists())
-
-    def test_invalid_assessment_protocol(self):
-        """Без входов проверяет отказ от некорректного решения оценки, не превращая его в skip; возвращает None."""
-        self.run.mkdir()
-        proposal = pipeline.MemoryProposal(self.target, "personal", self.run, self.before, self.after)
-        with patch.object(replay, "run_codex", return_value='{"decision":"skip"}'):
-            with self.assertRaisesRegex(RuntimeError, "протокол оценки"):
-                replay.assess_replay(proposal, None, "codex", "test")
-
-    def test_skip_preserves_expensive_measurements(self):
-        """Без входов проверяет передачу времени и объёма исходной задачи без запуска worker; возвращает None."""
-        self.run.mkdir()
-        scenario = replay.ReplayScenario("Большой запрос", self.inputs, self.reference,
-                                         {"duration_seconds": 18000, "result_bytes": 40_000_000_000})
-        proposal = pipeline.MemoryProposal(self.target, "personal", self.run, self.before, self.after)
-        with patch.object(replay, "run_codex", return_value=json.dumps({
-            "decision": "skip", "summary": "Повтор требует нескольких часов",
-            "context": "Контекст доступен", "resources": "5 часов, 40 ГБ",
-        })), patch.object(replay.subprocess, "run") as worker:
-            replay.assess_replay(proposal, scenario, "codex", "test")
-        worker.assert_not_called()
-        recorded = json.loads((self.run / "replay-assessment/scenario.json").read_text(encoding="utf-8"))
-        self.assertEqual(recorded["reference_metrics"], scenario.reference_metrics)
-
 
 @unittest.skipUnless(importlib.util.find_spec("langchain_core"), "Нужно окружение с LangChain")
 class ReplayMetricsTests(unittest.TestCase):
@@ -358,7 +297,7 @@ class ReplayMetricsTests(unittest.TestCase):
         """Без входов проверяет два запроса модели и вызов инструмента; возвращает None."""
         from langchain_core.messages import AIMessage
         from langchain_core.outputs import ChatGeneration, LLMResult
-        from replay_worker import ReplayMetrics
+        from command_agent_memory.memory_evaluation.dialogue_runner import ReplayMetrics
 
         callback = ReplayMetrics()
         response = LLMResult(generations=[[ChatGeneration(message=AIMessage(

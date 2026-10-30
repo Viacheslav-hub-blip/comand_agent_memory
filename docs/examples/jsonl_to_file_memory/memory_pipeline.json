@@ -1,0 +1,28 @@
+{
+  "defaults": {
+    "provider": "openrouter",
+    "model": "YOUR_MODEL_ID"
+  },
+  "stages": {
+    "review": {
+      "provider": "openrouter",
+      "model": "YOUR_REVIEW_MODEL_ID"
+    }
+  },
+  "wishes_file": "user_instructions.txt",
+  "users": [
+    {
+      "user_id": "demo",
+      "workspace": "../../../data/agent-connection-demo",
+      "source": {
+        "type": "jsonl",
+        "path": "conversation_events.jsonl"
+      },
+      "memory": {
+        "root": "memory",
+        "personal": ["CLAUDE.md"],
+        "knowledge": ["notes"]
+      }
+    }
+  ]
+}
