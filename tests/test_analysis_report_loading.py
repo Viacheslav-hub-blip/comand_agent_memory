@@ -11,7 +11,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from command_agent_memory.run_reports import read_reports
+from command_agent_memory.history_analysis.analysis_reports import read_reports
 
 
 class ReportInputTests(unittest.TestCase):

@@ -14,15 +14,15 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from command_agent_memory.model_providers import ModelAdapter
-import command_agent_memory.model_providers as registry
+from command_agent_memory.model_execution.provider_registry import ModelAdapter
+import command_agent_memory.model_execution.provider_registry as registry
 from command_agent_memory.memory_pipeline import run_pipeline
-from command_agent_memory.conversation_history import load_history_source
-from command_agent_memory.memory.storage_registry import load_memory_store, register_memory_store
-from command_agent_memory.memory import storage_registry as backends
-from command_agent_memory.memory.sqlite_storage import SQLiteMemoryStore
-from command_agent_memory.memory.file_storage import MemoryLayout
-from command_agent_memory.sql_history_source import json_value
+from command_agent_memory.history_sources.conversation_history import load_history_source
+from command_agent_memory.memory_storage.storage_registry import load_memory_store, register_memory_store
+from command_agent_memory.memory_storage import storage_registry as backends
+from command_agent_memory.memory_storage.sqlite_storage import SQLiteMemoryStore
+from command_agent_memory.memory_storage.memory_layout import MemoryLayout
+from command_agent_memory.history_sources.sql_history_source import json_value
 
 
 class SQLSourceTests(unittest.TestCase):

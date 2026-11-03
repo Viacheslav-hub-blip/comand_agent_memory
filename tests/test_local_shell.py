@@ -15,7 +15,7 @@ from pathlib import Path
 import tempfile
 from unittest.mock import patch
 
-from command_agent_memory.agent_execution.local_shell import RobustLocalShellBackend, decode_shell_output
+from command_agent_memory.model_execution.local_shell import RobustLocalShellBackend, decode_shell_output
 
 
 class RobustLocalShellTests(unittest.TestCase):

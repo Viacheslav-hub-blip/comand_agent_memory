@@ -1,0 +1,289 @@
+"""Прямой запуск агента через OpenRouter без Codex CLI.
+
+Вход: модель OpenRouter, ключ из окружения либо local_settings/agent_settings.py, задание и рабочая область.
+Выход: последний ответ агента; prompt, JSONL-трасса, stderr, ответ и metrics.json.
+Функции: openrouter_api_key — чтение ключа; validate_openrouter — проверка окружения;
+_message_text — извлечение текста; run_openrouter_chat — один вызов без инструментов;
+run_openrouter — запуск с бюджетом; _run_openrouter — исполнение агента;
+main — дочерний процесс задания с ограничением времени.
+"""
+import json
+import os
+from pathlib import Path
+from time import perf_counter
+from typing import Any
+from uuid import uuid4
+from dataclasses import asdict
+import subprocess
+import sys
+
+from command_agent_memory.model_execution.execution_policy import (
+    current_execution_policy, execution_policy, run_bounded_process,
+)
+from command_agent_memory.model_execution.runtime_environment import describe_execution_environment
+
+
+OPENROUTER_TIMEOUT_SECONDS = 180
+OPENROUTER_MAX_RETRIES = 0
+
+
+def openrouter_api_key() -> str:
+    """Без входов возвращает ключ из окружения либо local_settings/agent_settings.py; при отсутствии вызывает ValueError."""
+    key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not key:
+        from command_agent_memory.application_config import read_local_settings
+
+        key = read_local_settings().get("openrouter_api_key", "")
+    if not key:
+        raise ValueError("Задай OPENROUTER_API_KEY или openrouter_api_key в local_settings/agent_settings.py.")
+    return key
+
+
+def validate_openrouter() -> None:
+    """Проверяет ключ и библиотеки OpenRouter-исполнителя; возвращает None.
+
+    Отсутствующий ключ или библиотека вызывают исключение до сетевого запроса.
+    Значение ключа не читается и не записывается в журналы.
+    """
+    openrouter_api_key()
+    try:
+        import deepagents  # noqa: F401
+        import langchain_openai  # noqa: F401
+    except ImportError as error:
+        raise RuntimeError("Для OpenRouter нужны пакеты deepagents и langchain-openai.") from error
+
+
+def _message_text(content: Any) -> str:
+    """Принимает содержимое сообщения LangChain; возвращает объединённый текст."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+        return "\n".join(parts)
+    return str(content) if content is not None else ""
+
+
+def run_openrouter_chat(_runtime: str, model: str, prompt: str, cwd: Path,
+                        prefix: Path, writable: bool = False) -> str:
+    """Принимает задание и модель; выполняет один запрос без инструментов и возвращает текст.
+
+    cwd и writable сохранены для общего интерфейса исполнителей. Функция пишет
+    prompt, ответ, JSONL-сообщение и metrics.json. Файлы рабочей области модели
+    недоступны, поэтому этот режим подходит для анализа уже переданного текста.
+    """
+    validate_openrouter()
+    from langchain_core.callbacks.usage import UsageMetadataCallbackHandler
+    from langchain_core.messages import HumanMessage, message_to_dict
+    from langchain_openai import ChatOpenAI
+
+    prompt = describe_execution_environment(cwd.absolute()) + "\n\n" + prompt
+    del cwd, writable
+    prefix.parent.mkdir(parents=True, exist_ok=True)
+    prefix.with_suffix(".prompt.md").write_text(prompt, encoding="utf-8")
+    callback = UsageMetadataCallbackHandler()
+    chat_model = ChatOpenAI(
+        model=model,
+        api_key=openrouter_api_key(),
+        base_url="https://openrouter.ai/api/v1",
+        timeout=OPENROUTER_TIMEOUT_SECONDS,
+        max_retries=OPENROUTER_MAX_RETRIES,
+    )
+    started = perf_counter()
+    completed = False
+    try:
+        response = chat_model.invoke([HumanMessage(content=prompt)], config={"callbacks": [callback]})
+        answer = _message_text(response.content)
+        if not answer.strip():
+            raise RuntimeError("OpenRouter не выдал текст отчёта.")
+        prefix.with_suffix(".last.txt").write_text(answer, encoding="utf-8")
+        prefix.with_suffix(".jsonl").write_text(
+            json.dumps(message_to_dict(response), ensure_ascii=False, default=str) + "\n",
+            encoding="utf-8",
+        )
+        prefix.with_suffix(".stderr.log").write_text("", encoding="utf-8")
+        completed = True
+        return answer
+    except BaseException as error:
+        prefix.with_suffix(".stderr.log").write_text(
+            f"{type(error).__name__}: {error}\n", encoding="utf-8",
+        )
+        raise
+    finally:
+        prefix.with_suffix(".metrics.json").write_text(json.dumps({
+            "backend": "openrouter", "mode": "single-call", "model": model,
+            "duration_seconds": perf_counter() - started, "completed": completed,
+            "usage": getattr(callback, "usage_metadata", None) or None,
+        }, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+
+
+def run_openrouter(_runtime: str, model: str, prompt: str, cwd: Path,
+                   prefix: Path, writable: bool = False) -> str:
+    """Принимает задание Runner; возвращает ответ, ограничивая весь сеанс текущим бюджетом.
+
+    При тайм-ауте останавливает дочерний процесс и сохраняет неполный исход.
+    Ключи не сериализуются: дочерний процесс читает обычные локальные настройки.
+    """
+    policy = current_execution_policy()
+    if policy.timeout_seconds is None:
+        return _run_openrouter(_runtime, model, prompt, cwd, prefix, writable)
+    prefix.parent.mkdir(parents=True, exist_ok=True)
+    prefix.with_suffix(".prompt.md").write_text(prompt, encoding="utf-8")
+    payload = {"model": model, "prompt": prompt, "cwd": str(cwd.absolute()),
+               "prefix": str(prefix.absolute()), "writable": writable, "policy": asdict(policy)}
+    started = perf_counter()
+    try:
+        result = run_bounded_process(
+            [sys.executable, "-m", "command_agent_memory.model_execution.openrouter_api"],
+            json.dumps(payload), policy.timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as error:
+        prefix.with_suffix(".metrics.json").write_text(json.dumps({
+            "model": model, "completed": False, "limit_exceeded": "timeout",
+            "duration_seconds": perf_counter() - started, "timeout_seconds": policy.timeout_seconds,
+            "usage": None, "usage_complete": False,
+        }, indent=2), encoding="utf-8")
+        prefix.with_suffix(".stderr.log").write_text("Исчерпан бюджет времени модельного этапа.", encoding="utf-8")
+        raise TimeoutError(f"Модельный этап превысил {policy.timeout_seconds} секунд: {prefix}") from error
+    if result.returncode:
+        if not prefix.with_suffix(".stderr.log").exists():
+            prefix.with_suffix(".stderr.log").write_text(result.stderr or "Ошибка дочернего процесса.", encoding="utf-8")
+        raise RuntimeError(f"Модельный этап не завершён; см. {prefix.with_suffix('.stderr.log')}")
+    return prefix.with_suffix(".last.txt").read_text(encoding="utf-8")
+
+
+def _run_openrouter(_runtime: str, model: str, prompt: str, cwd: Path,
+                    prefix: Path, writable: bool = False) -> str:
+    """Принимает совместимые параметры исполнителя; возвращает последний ответ агента.
+
+    Первый параметр сохранён для единого интерфейса с Codex и не используется.
+    Модель вызывается напрямую через OpenRouter. Агент получает файловые и shell
+    инструменты в cwd. При writable=False промпт запрещает изменения файлов.
+    Доступные сообщения и usage сохраняются даже при сбое.
+    """
+    validate_openrouter()
+    from deepagents import create_deep_agent
+    from langchain_core.callbacks.usage import UsageMetadataCallbackHandler
+    from langchain_core.messages import AIMessage, HumanMessage, message_to_dict
+    from langchain_openai import ChatOpenAI
+    from command_agent_memory.model_execution.local_shell import RobustLocalShellBackend
+    from command_agent_memory.model_execution.scoped_filesystem import ScopedFilesystemBackend
+    from langchain.agents.middleware import ModelCallLimitMiddleware
+    from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
+
+    cwd = cwd.resolve()
+    prefix.parent.mkdir(parents=True, exist_ok=True)
+    prefix.with_suffix(".prompt.md").write_text(prompt, encoding="utf-8")
+    trace_path = prefix.with_suffix(".jsonl")
+    error_path = prefix.with_suffix(".stderr.log")
+    output_path = prefix.with_suffix(".last.txt")
+    instruction = prompt
+    if not writable:
+        instruction += "\n\nФайлы доступны только для чтения. Не создавай, не изменяй и не удаляй их."
+    callback = UsageMetadataCallbackHandler()
+    chat_model = ChatOpenAI(
+        model=model,
+        api_key=openrouter_api_key(),
+        base_url="https://openrouter.ai/api/v1",
+        timeout=OPENROUTER_TIMEOUT_SECONDS,
+        max_retries=OPENROUTER_MAX_RETRIES,
+    )
+    policy = current_execution_policy()
+    if policy.write_paths is not None:
+        backend = ScopedFilesystemBackend(cwd, policy.write_paths if writable else ())
+    else:
+        backend = RobustLocalShellBackend(root_dir=cwd, virtual_mode=False, inherit_env=True)
+    middleware = ([ModelCallLimitMiddleware(run_limit=policy.max_model_calls, exit_behavior="error")]
+                  if policy.max_model_calls is not None else [])
+    environment = describe_execution_environment(
+        cwd, file_paths="scoped" if policy.write_paths is not None else "native",
+        shell=policy.write_paths is None,
+    )
+    prefix.with_suffix(".environment.md").write_text(environment, encoding="utf-8")
+    agent = create_deep_agent(
+        model=chat_model,
+        backend=backend,
+        middleware=middleware,
+        system_prompt=(
+            environment + "\n\n" +
+            "Выполни одну переданную задачу. Не создавай подзадачи и не делегируй работу. "
+            + ("Используй тексты, уже включённые в запрос. Дополнительные файлы открывай "
+               "только для конкретного вопроса или точечной правки. "
+               if policy.write_paths is not None else
+               "Сразу прочитай указанные файлы, внеси требуемые изменения и проверь их. ")
+            +
+            "Не повторяй одинаковые вызовы инструментов. После проверки верни итоговый ответ."
+        ),
+    )
+    messages = []
+    seen_messages = set()
+    limit_exceeded = None
+    started = perf_counter()
+    try:
+        with trace_path.open("w", encoding="utf-8") as trace:
+            for event in agent.stream(
+                {"messages": [HumanMessage(content=instruction)]},
+                config={"configurable": {"thread_id": str(uuid4())}, "callbacks": [callback],
+                        "recursion_limit": max(50, policy.max_model_calls * 4) if policy.max_model_calls else 1000},
+                stream_mode="updates",
+            ):
+                if not isinstance(event, dict):
+                    continue
+                for state in event.values():
+                    if not isinstance(state, dict):
+                        continue
+                    for message in state.get("messages", []) or []:
+                        record = message_to_dict(message)
+                        marker = json.dumps(record, ensure_ascii=False, sort_keys=True, default=str)
+                        if marker in seen_messages:
+                            continue
+                        seen_messages.add(marker)
+                        messages.append(message)
+                        trace.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+                        trace.flush()
+        answer = next(
+            (_message_text(message.content) for message in reversed(messages)
+             if isinstance(message, AIMessage) and _message_text(message.content).strip()),
+            "",
+        )
+        if not answer:
+            raise RuntimeError("OpenRouter-агент не выдал итоговый ответ.")
+        output_path.write_text(answer, encoding="utf-8")
+        error_path.write_text("", encoding="utf-8")
+        completed = True
+        return answer
+    except BaseException as error:
+        if isinstance(error, ModelCallLimitExceededError):
+            limit_exceeded = "model_calls"
+        error_path.write_text(f"{type(error).__name__}: {error}\n", encoding="utf-8")
+        completed = False
+        raise
+    finally:
+        usage = getattr(callback, "usage_metadata", None)
+        metrics = {
+            "backend": "openrouter", "model": model,
+            "duration_seconds": perf_counter() - started,
+            "completed": completed if "completed" in locals() else False,
+            "usage": usage or None,
+            "max_model_calls": policy.max_model_calls,
+            "limit_exceeded": limit_exceeded,
+        }
+        prefix.with_suffix(".metrics.json").write_text(
+            json.dumps(metrics, ensure_ascii=False, indent=2, default=str), encoding="utf-8",
+        )
+
+
+def main() -> None:
+    """Читает JSON-задание из stdin; запускает агента с его политикой, возвращает None."""
+    task = json.load(sys.stdin)
+    with execution_policy(**task["policy"]):
+        _run_openrouter("", task["model"], task["prompt"], Path(task["cwd"]),
+                        Path(task["prefix"]), task["writable"])
+
+
+if __name__ == "__main__":
+    main()

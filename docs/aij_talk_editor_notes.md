@@ -73,7 +73,7 @@
 - [Контракты адаптеров](adding_integrations.md).
 - [Поведение replay](evaluating_memory_with_replay.md).
 - [Конвейер и вызов командной консолидации](../command_agent_memory/memory_pipeline.py).
-- [Сравнение с прежним результатом](../command_agent_memory/memory_evaluation/replay_evaluation.py).
-- [Текущий командный режим](../command_agent_memory/memory/team_memory.py).
+- [Сравнение с прежним результатом](../command_agent_memory/memory_replay/replay_evaluation.py).
+- [Текущий командный режим](../command_agent_memory/memory_update/team_memory_update.py).
 - [Целевой жизненный цикл](../specifications/memory_lifecycle.md).
 - [Предложение распределённого SDK](../specifications/distributed_team_memory.md).

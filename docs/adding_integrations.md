@@ -23,7 +23,7 @@ iter_events выдаёт сообщения выбранной сессии. Д�
 import json
 from pathlib import Path
 
-from command_agent_memory.conversation_history import HistoryEvent, register_history_source
+from command_agent_memory.history_sources.conversation_history import HistoryEvent, register_history_source
 
 
 class ExportHistory:
@@ -54,7 +54,7 @@ register_history_source("export", ExportHistory)
 ## Исполнитель модели или агента
 
 Импортируйте `ModelAdapter` и `register_model_adapter` из
-`command_agent_memory.model_providers`. Фабрика получает `Path | None` исполняемого файла
+`command_agent_memory.model_execution.provider_registry`. Фабрика получает `Path | None` исполняемого файла
 и возвращает `ModelAdapter(name, executable, agent_runner, chat_runner)`.
 
 Оба runner получают аргументы общей сигнатуры:
@@ -78,7 +78,7 @@ def run(executable: str, model: str, prompt: str, cwd: Path,
 
 ## Хранилище памяти
 
-Контракт находится в `command_agent_memory.memory.storage_registry.MemoryStore`.
+Контракт находится в `command_agent_memory.memory_storage.storage_registry.MemoryStore`.
 Фабрика `(options: dict, base: Path, layout: MemoryLayout) -> MemoryStore`
 регистрируется через `register_memory_store("my_store", factory)`.
 
@@ -110,20 +110,21 @@ def run(executable: str, model: str, prompt: str, cwd: Path,
 ```
 
 Образец реализации транзакций —
-[`SQLiteMemoryStore`](../command_agent_memory/memory/sqlite_storage.py).
+[`SQLiteMemoryStore`](../command_agent_memory/memory_storage/sqlite_storage.py).
 Реализация с резервной копией файлов —
-[`FileMemoryStore`](../command_agent_memory/memory/file_storage.py).
+[`FileMemoryStore`](../command_agent_memory/memory_storage/file_storage.py).
 Для чтения памяти самим рабочим агентом используйте его SDK или выберите
 файловый backend с привычным ему файлом инструкций.
 
 ## Границы модулей
 
 - memory_pipeline управляет чтением, двумя анализами, консолидацией, ревью и публикацией.
-- pipeline_config выбирает провайдера и модель каждого этапа.
-- conversation_history нормализует события без привязки к хранилищу памяти.
-- memory работает с документами как dict[str, bytes]; модели редактируют копию.
-- memory_evaluation выполняет диалог и сравнение при запрошенной проверке.
-- run_reports хранит версии входов, снимки и отчёты этапов.
+- application_config проверяет настройки; model_execution.stage_runner выполняет модельные этапы.
+- history_sources получает события; history_analysis извлекает контекст и процедуры.
+- memory_update готовит и проверяет изменения; memory_storage читает и сохраняет документы.
+- team_memory_delivery доставляет опубликованную локальную командную память.
+- memory_replay выполняет диалог и сравнение при запрошенной проверке.
+- run_reports оформляет отчёты этапов; history_analysis.analysis_reports проверяет версии анализов.
 
 Функция run_pipeline(path, validate_only=False, evaluate_by_replay=False)
 находится в command_agent_memory.memory_pipeline. Это программная точка входа.
@@ -131,7 +132,7 @@ def run(executable: str, model: str, prompt: str, cwd: Path,
 `command_agent_memory/skills/<skill-name>/SKILL.md` и включаются в wheel как данные
 пакета вместе с собственными `references/`. Поле `name` совпадает с именем
 каталога и использует строчные буквы и дефисы. Для получения пути вызывайте
-`get_skill_path(name, resource="SKILL.md")` из `command_agent_memory.project_paths`.
+`get_skill_path(name, resource="SKILL.md")` из `command_agent_memory.skill_resources`.
 
 Локальные блокировки предотвращают одновременную обработку одним окружением.
 Для удалённого хранилища дополнительно нужна серверная транзакция или проверка

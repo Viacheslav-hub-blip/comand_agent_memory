@@ -14,8 +14,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from command_agent_memory.project_paths import ROOT
-from command_agent_memory.memory_evaluation.replay_evaluation import ReplayScenario, load_replay_scenario
+from command_agent_memory.skill_resources import ROOT
+from command_agent_memory.memory_replay.replay_scenario import ReplayScenario, load_replay_scenario
 
 
 HAS_RUNTIME = bool(importlib.util.find_spec("langchain_core") and importlib.util.find_spec("deepagents"))
@@ -64,8 +64,8 @@ class DialogueReplayTests(unittest.TestCase):
 
     def setUp(self):
         """Создаёт чистую область, эталон и имитации двух участников диалога."""
-        from command_agent_memory.memory_evaluation import dialogue_runner as dialogue
-        from command_agent_memory.memory_evaluation.dialogue_runner import ReplayMetrics
+        from command_agent_memory.memory_replay import dialogue_runner as dialogue
+        from command_agent_memory.memory_replay.dialogue_runner import ReplayMetrics
 
         self.module = dialogue
         self.temporary = tempfile.TemporaryDirectory()
@@ -137,11 +137,13 @@ class DialogueReplayTests(unittest.TestCase):
         self.assertNotIn("system_prompt", self.factory_call.kwargs)
         initialization = json.loads((self.root / "result/initialization.json").read_text(encoding="utf-8"))
         self.assertIsNone(initialization["system_prompt"])
-        self.assertEqual(initialization["system_prompt_source"], "deepagents_default")
+        self.assertEqual(initialization["system_prompt_source"], "deepagents_default_with_environment")
+        self.assertTrue(initialization["operating_system"])
+        self.assertTrue(initialization["python_version"])
 
     def test_absent_memory_paths_are_read_only_without_memory(self):
         """Без памяти проверяет запрет создания отсутствующих AGENTS.md и skills."""
-        from command_agent_memory.agent_execution.local_shell import RobustLocalShellBackend
+        from command_agent_memory.model_execution.local_shell import RobustLocalShellBackend
 
         (self.workspace / "AGENTS.md").unlink()
         self.execute(memory_enabled=False)
@@ -214,15 +216,17 @@ class DialogueReplayTests(unittest.TestCase):
 
     def test_factory_initializes_memory_and_virtual_paths(self):
         """Собирает настоящий backend; проверяет память при инициализации и разрешение путей."""
-        from command_agent_memory.agent_execution.conversation_runner import create_agent
+        from command_agent_memory.memory_replay.replay_agent import create_agent
 
         (self.workspace / "knowledge/skills").mkdir(parents=True)
         (self.workspace / "knowledge/INDEX.md").write_text("Индекс", encoding="utf-8")
         with patch("deepagents.create_deep_agent") as factory, patch("langchain_openai.ChatOpenAI"), patch(
-                "command_agent_memory.model_providers.openrouter_api.openrouter_api_key", return_value="test-key"):
+                "command_agent_memory.model_execution.openrouter_api.openrouter_api_key", return_value="test-key"):
             create_agent(self.workspace, model_name="test")
             configured = factory.call_args.kwargs
-            self.assertNotIn("system_prompt", configured)
+            self.assertIn("Операционная система:", configured["system_prompt"])
+            self.assertIn(self.workspace.as_posix(), configured["system_prompt"])
+            self.assertIn("виртуальные пути /", configured["system_prompt"])
             self.assertEqual(configured["memory"], ["/AGENTS.md", "/knowledge/INDEX.md"])
             self.assertEqual(configured["skills"], ["/knowledge/skills/"])
             downloaded = configured["backend"].download_files(["/inputs/data.csv"])[0]

@@ -28,7 +28,13 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import command_agent_memory.memory.personal_memory as pipeline
+import command_agent_memory.memory_update.personal_memory_update as pipeline
+from command_agent_memory.memory_update import memory_proposal as proposals, memory_review as reviews
+from command_agent_memory.memory_storage import file_storage
+from command_agent_memory.memory_storage.file_storage import publish_memory
+from command_agent_memory.memory_storage.memory_locking import memory_lock
+from command_agent_memory.memory_storage.memory_snapshots import read_memory, write_snapshot
+from command_agent_memory.skill_resources import ROOT
 
 
 class ReviewedConsolidationTests(unittest.TestCase):
@@ -36,13 +42,13 @@ class ReviewedConsolidationTests(unittest.TestCase):
 
     def setUp(self):
         """Без входов создаёт изолированную память внутри проекта; возвращает None."""
-        temporary_root = pipeline.ROOT / "tmp"
+        temporary_root = ROOT / "tmp"
         temporary_root.mkdir(exist_ok=True)
         self.temporary = tempfile.TemporaryDirectory(dir=temporary_root)
         self.base = Path(self.temporary.name)
         self.target = self.base / "knowledge"
         self.before = {"INDEX.md": b"old index", "wiki/page.md": b"old page"}
-        pipeline.write_snapshot(self.target, self.before)
+        write_snapshot(self.target, self.before)
         self.after = {"INDEX.md": b"new index", "wiki/page.md": b"new page"}
         self.stage = "knowledge"
         self.decision = {"decision": "accepted", "summary": "Принято", "findings": []}
@@ -53,7 +59,7 @@ class ReviewedConsolidationTests(unittest.TestCase):
 
     def tearDown(self):
         """Без входов удаляет созданную тестом временную область; возвращает None."""
-        self.assertTrue(self.base.resolve().is_relative_to((pipeline.ROOT / "tmp").resolve()))
+        self.assertTrue(self.base.resolve().is_relative_to((ROOT / "tmp").resolve()))
         self.temporary.cleanup()
 
     def simulate_codex(self, executable, model, prompt, cwd, prefix, writable=False):
@@ -73,15 +79,19 @@ class ReviewedConsolidationTests(unittest.TestCase):
         self.assertTrue(writable)
         if self.failure == "review":
             raise RuntimeError("Сбой ревьюера")
-        self.assertEqual(pipeline.read_memory(self.target, self.stage), self.before)
+        self.assertEqual(read_memory(self.target, self.stage), self.before)
         if self.change_original:
             (self.target / "external.md").write_bytes(b"external edit")
         return self.raw_reply if self.raw_reply is not None else json.dumps(self.decision)
 
     def execute(self):
         """Без входов запускает обработку с имитацией CLI; возвращает None или исключение."""
-        skill = pipeline.ROOT / "command_agent_memory/skills/knowledge-consolidation/SKILL.md"
-        with patch.object(pipeline, "run_codex", side_effect=self.simulate_codex):
+        skill = ROOT / "command_agent_memory/skills/knowledge-consolidation/SKILL.md"
+        with (
+            patch.object(pipeline, "run_codex", side_effect=self.simulate_codex),
+            patch.object(proposals, "run_codex", side_effect=self.simulate_codex),
+            patch.object(reviews, "run_codex", side_effect=self.simulate_codex),
+        ):
             pipeline.consolidate_with_review(
                 self.target, self.stage, "Сведения", skill, "codex", "test-model", self.base / "run",
             )
@@ -90,8 +100,8 @@ class ReviewedConsolidationTests(unittest.TestCase):
         """Без входов проверяет перенос после одного ревью всей копии; возвращает None."""
         self.execute()
         self.assertEqual(self.review_count, 1)
-        self.assertEqual(pipeline.read_memory(self.target, self.stage), self.after)
-        self.assertEqual(pipeline.read_memory(self.base / "run/before", self.stage), self.before)
+        self.assertEqual(read_memory(self.target, self.stage), self.after)
+        self.assertEqual(read_memory(self.base / "run/before", self.stage), self.before)
         self.assertEqual(json.loads((self.base / "run/status.json").read_text())["state"], "published")
 
     def test_rejection_does_not_write_originals(self):
@@ -100,8 +110,8 @@ class ReviewedConsolidationTests(unittest.TestCase):
         self.decision["findings"] = [{"file": "wiki/page.md", "problem": "Ошибка", "change": "Исправить"}]
         with self.assertRaises(RuntimeError):
             self.execute()
-        self.assertEqual(pipeline.read_memory(self.target, self.stage), self.before)
-        self.assertEqual(pipeline.read_memory(self.base / "run/after", self.stage), self.after)
+        self.assertEqual(read_memory(self.target, self.stage), self.before)
+        self.assertEqual(read_memory(self.base / "run/after", self.stage), self.after)
         self.assertEqual(json.loads((self.base / "run/status.json").read_text())["state"], "rejected")
 
     def test_needs_resolution_does_not_write_originals(self):
@@ -109,14 +119,14 @@ class ReviewedConsolidationTests(unittest.TestCase):
         self.decision["decision"] = "needs_resolution"
         with self.assertRaises(RuntimeError):
             self.execute()
-        self.assertEqual(pipeline.read_memory(self.target, self.stage), self.before)
+        self.assertEqual(read_memory(self.target, self.stage), self.before)
 
     def test_invalid_reply_does_not_publish(self):
         """Без входов проверяет остановку на неразбираемом ответе; возвращает None."""
         self.raw_reply = "не JSON"
         with self.assertRaises(ValueError):
             self.execute()
-        self.assertEqual(pipeline.read_memory(self.target, self.stage), self.before)
+        self.assertEqual(read_memory(self.target, self.stage), self.before)
 
     def test_review_reply_with_prefix_is_parsed(self):
         """Без входов проверяет извлечение последнего строгого JSON из ответа с пояснением; возвращает None."""
@@ -124,7 +134,7 @@ class ReviewedConsolidationTests(unittest.TestCase):
         self.execute()
         decision = json.loads((self.base / "run/reviews/review-001.json").read_text(encoding="utf-8"))
         self.assertEqual(decision, self.decision)
-        self.assertEqual(pipeline.read_memory(self.target, self.stage), self.after)
+        self.assertEqual(read_memory(self.target, self.stage), self.after)
 
     def test_accepted_with_findings_does_not_publish(self):
         """Без входов проверяет противоречивое решение accepted с замечаниями; возвращает None."""
@@ -133,21 +143,21 @@ class ReviewedConsolidationTests(unittest.TestCase):
         }]
         with self.assertRaises(RuntimeError):
             self.execute()
-        self.assertEqual(pipeline.read_memory(self.target, self.stage), self.before)
+        self.assertEqual(read_memory(self.target, self.stage), self.before)
 
     def test_writer_failure_does_not_publish(self):
         """Без входов проверяет сохранность памяти при сбое записи копии; возвращает None."""
         self.failure = "writer"
         with self.assertRaises(RuntimeError):
             self.execute()
-        self.assertEqual(pipeline.read_memory(self.target, self.stage), self.before)
+        self.assertEqual(read_memory(self.target, self.stage), self.before)
 
     def test_reviewer_failure_does_not_publish(self):
         """Без входов проверяет сохранность памяти при сбое проверки; возвращает None."""
         self.failure = "review"
         with self.assertRaises(RuntimeError):
             self.execute()
-        self.assertEqual(pipeline.read_memory(self.target, self.stage), self.before)
+        self.assertEqual(read_memory(self.target, self.stage), self.before)
 
     def test_external_edit_blocks_stale_publication(self):
         """Без входов проверяет сохранение внешней правки вместо устаревшей копии; возвращает None."""
@@ -156,7 +166,7 @@ class ReviewedConsolidationTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.execute()
         with self.assertRaisesRegex(RuntimeError, "изменилась"):
-            pipeline.publish_memory(self.target, self.before, self.after, self.stage, self.base / "publish-check")
+            publish_memory(self.target, self.before, self.after, self.stage, self.base / "publish-check")
         self.assertEqual((self.target / "external.md").read_bytes(), b"external edit")
 
     def test_personal_preserves_chat_database_and_other_files(self):
@@ -165,12 +175,12 @@ class ReviewedConsolidationTests(unittest.TestCase):
         self.before = {"AGENTS.md": b"old rules", "USER_PREFERENCES.md": b"old preferences"}
         self.after = {"AGENTS.md": b"new rules", "USER_PREFERENCES.md": b"new preferences", "user_llm_wiki/INDEX.md": b"new wiki"}
         self.target = self.base / "personal"
-        pipeline.write_snapshot(self.target, self.before)
+        write_snapshot(self.target, self.before)
         (self.target / "chat_logs.db").write_bytes(b"database must stay")
         (self.target / "raw").mkdir()
         (self.target / "raw/report.md").write_bytes(b"report must stay")
         self.execute()
-        self.assertEqual(pipeline.read_memory(self.target, self.stage), self.after)
+        self.assertEqual(read_memory(self.target, self.stage), self.after)
         self.assertEqual((self.target / "chat_logs.db").read_bytes(), b"database must stay")
         self.assertEqual((self.target / "raw/report.md").read_bytes(), b"report must stay")
 
@@ -186,17 +196,17 @@ class ReviewedConsolidationTests(unittest.TestCase):
                 raise OSError("Сбой переноса")
             return replace(source, destination)
 
-        with patch.object(pipeline.os, "replace", side_effect=fail_once):
+        with patch.object(file_storage.os, "replace", side_effect=fail_once):
             with self.assertRaises(OSError):
-                pipeline.publish_memory(self.target, self.before, self.after, self.stage, self.base / "publication")
-        self.assertEqual(pipeline.read_memory(self.target, self.stage), self.before)
+                publish_memory(self.target, self.before, self.after, self.stage, self.base / "publication")
+        self.assertEqual(read_memory(self.target, self.stage), self.before)
 
     def test_personal_publication_exception_restores_all_files(self):
         """Без входов проверяет восстановление нескольких личных файлов после сбоя; возвращает None."""
         target = self.base / "personal"
         before = {"AGENTS.md": b"old rules", "USER_PREFERENCES.md": b"old preferences"}
         after = {"AGENTS.md": b"new rules", "USER_PREFERENCES.md": b"new preferences"}
-        pipeline.write_snapshot(target, before)
+        write_snapshot(target, before)
         run = self.base / "personal-publication"
         replace = os.replace
 
@@ -206,17 +216,17 @@ class ReviewedConsolidationTests(unittest.TestCase):
                 raise OSError("Сбой переноса предпочтений")
             return replace(source, destination)
 
-        with patch.object(pipeline.os, "replace", side_effect=fail_on_preferences):
+        with patch.object(file_storage.os, "replace", side_effect=fail_on_preferences):
             with self.assertRaises(OSError):
-                pipeline.publish_memory(target, before, after, "personal", run)
-        self.assertEqual(pipeline.read_memory(target, "personal"), before)
+                publish_memory(target, before, after, "personal", run)
+        self.assertEqual(read_memory(target, "personal"), before)
 
     def test_accepted_deletion_is_published(self):
         """Без входов проверяет принятую моделью операцию удаления и сохранность снимка; возвращает None."""
         self.after = {"INDEX.md": b"new index"}
         self.execute()
-        self.assertEqual(pipeline.read_memory(self.target, self.stage), self.after)
-        self.assertEqual(pipeline.read_memory(self.base / "run/before", self.stage), self.before)
+        self.assertEqual(read_memory(self.target, self.stage), self.after)
+        self.assertEqual(read_memory(self.base / "run/before", self.stage), self.before)
 
     def test_unchanged_memory_is_not_replaced(self):
         """Без входов проверяет ревью без повторной записи неизменной памяти; возвращает None."""
@@ -229,9 +239,9 @@ class ReviewedConsolidationTests(unittest.TestCase):
 
     def test_second_writer_is_blocked(self):
         """Без входов проверяет исключение конкурирующего писателя; возвращает None."""
-        with pipeline.memory_lock(self.target):
+        with memory_lock(self.target):
             with self.assertRaises(RuntimeError):
-                with pipeline.memory_lock(self.target):
+                with memory_lock(self.target):
                     self.fail("Вторая блокировка не должна быть получена")
 
     def test_overlapping_run_is_rejected(self):
@@ -241,7 +251,7 @@ class ReviewedConsolidationTests(unittest.TestCase):
                 self.target, self.stage, "Сведения", Path("unused"), "codex", "test", self.target / "run",
             )
         self.assertFalse((self.target / "run").exists())
-        self.assertEqual(pipeline.read_memory(self.target, self.stage), self.before)
+        self.assertEqual(read_memory(self.target, self.stage), self.before)
 
     def test_symbolic_link_is_not_copied(self):
         """Без входов проверяет отказ от перехода по ссылке; возвращает None."""
@@ -251,7 +261,7 @@ class ReviewedConsolidationTests(unittest.TestCase):
         except OSError:
             self.skipTest("Создание symlink недоступно в этом окружении")
         with self.assertRaisesRegex(RuntimeError, "Ссылка"):
-            pipeline.read_memory(self.target, self.stage)
+            read_memory(self.target, self.stage)
 
     @unittest.skipUnless(os.name == "nt", "Проверка NTFS junction выполняется на Windows")
     def test_junction_is_not_copied(self):
@@ -264,9 +274,9 @@ class ReviewedConsolidationTests(unittest.TestCase):
         if result.returncode:
             self.skipTest("Создание junction недоступно")
         with self.assertRaisesRegex(RuntimeError, "Ссылка"):
-            pipeline.read_memory(self.target, self.stage)
+            read_memory(self.target, self.stage)
         with self.assertRaisesRegex(RuntimeError, "Ссылка"):
-            pipeline.read_memory(link, "personal")
+            read_memory(link, "personal")
 
 
 if __name__ == "__main__":

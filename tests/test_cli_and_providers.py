@@ -11,10 +11,10 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from command_agent_memory.model_providers import load_model_adapter
+from command_agent_memory.model_execution.provider_registry import load_model_adapter
 from command_agent_memory.run_reports import create_run_directory, new_run_id
 from command_agent_memory.__main__ import main
-from command_agent_memory.project_paths import get_skill_path
+from command_agent_memory.skill_resources import get_skill_path
 
 
 class PackageArchitectureTests(unittest.TestCase):
@@ -47,8 +47,8 @@ class PackageArchitectureTests(unittest.TestCase):
             """Принимает тестовые аргументы и возвращает фиктивный ответ."""
             return "ok"
 
-        with patch("command_agent_memory.model_providers.codex_cli.find_codex", return_value="codex"), patch(
-                "command_agent_memory.model_providers.codex_cli.run_codex", side_effect=runner) as mocked:
+        with patch("command_agent_memory.model_execution.codex_cli.find_codex", return_value="codex"), patch(
+                "command_agent_memory.model_execution.codex_cli.run_codex", side_effect=runner) as mocked:
             adapter = load_model_adapter("codex")
         self.assertEqual(adapter.name, "codex")
         self.assertEqual(adapter.executable, "codex")

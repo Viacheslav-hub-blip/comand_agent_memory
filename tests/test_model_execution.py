@@ -17,8 +17,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import command_agent_memory.agent_execution.conversation_runner as agent_runtime
-import command_agent_memory.model_providers.codex_cli as codex_client
+import command_agent_memory.memory_replay.replay_agent as agent_runtime
+import command_agent_memory.model_execution.codex_cli as codex_client
 
 
 class CodexClientTests(unittest.TestCase):
@@ -39,7 +39,7 @@ class CodexClientTests(unittest.TestCase):
 
     def invoke(self):
         """Без входов вызывает клиент с имитацией процесса; возвращает ответ или исключение."""
-        def emit(command, **kwargs):
+        def emit(command, payload, timeout, **kwargs):
             """Принимает команду и параметры процесса; записывает события, возвращает CompletedProcess."""
             for event in self.events:
                 kwargs["stdout"].write(json.dumps(event) + "\n")
@@ -48,7 +48,7 @@ class CodexClientTests(unittest.TestCase):
             Path(command[command.index("-o") + 1]).write_text("Ответ", encoding="utf-8")
             return subprocess.CompletedProcess(command, self.return_code)
 
-        with patch.object(codex_client.subprocess, "run", side_effect=emit):
+        with patch.object(codex_client, "run_bounded_process", side_effect=emit):
             return codex_client.run_codex("codex", "test-model", "Задание", self.root, self.prefix)
 
     def test_usage_and_duration(self):

@@ -1,0 +1,28 @@
+{
+  "defaults": {
+    "provider": "openrouter",
+    "model": "YOUR_MODEL_ID"
+  },
+  "users": [
+    {
+      "user_id": "USER_ID",
+      "workspace": "./runs/USER_ID",
+      "source": {
+        "type": "sqlite",
+        "path": "C:/path/to/employee/chat_logs.db",
+        "user_id": "USER_ID"
+      },
+      "memory": {
+        "type": "files",
+        "root": "C:/path/to/employee/workspace",
+        "personal": [
+          "AGENTS.md",
+          "USER_PREFERENCES.md"
+        ],
+        "knowledge": [
+          "knowledge"
+        ]
+      }
+    }
+  ]
+}

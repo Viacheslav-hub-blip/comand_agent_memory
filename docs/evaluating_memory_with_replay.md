@@ -53,6 +53,6 @@ python -m command_agent_memory --config memory_pipeline.json --evaluate-by-repla
 Неизвестные измерения остаются null. Защита памяти и проверка изменения исходных
 данных выполняются дополнительно к модельным решениям.
 
-Реализация: `command_agent_memory/memory_evaluation/`. Проверки:
+Реализация: `command_agent_memory/memory_replay/`. Проверки:
 `tests/test_dialogue_replay.py`, `tests/test_replay_evaluation.py` и проверки
 настроенного диалога в `tests/test_memory_pipeline.py`.

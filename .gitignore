@@ -1,5 +1,6 @@
 # Локальные настройки и секреты
 local_settings/agent_settings.py
+/memory_pipeline.json
 .env
 .env.*
 !.env.example
@@ -21,6 +22,7 @@ dist/
 Thumbs.db
 
 # Локальные результаты запусков и временные данные
+/runs/
 data/
 conversation_history/
 large_tool_results/

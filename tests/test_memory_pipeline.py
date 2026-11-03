@@ -16,13 +16,15 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from command_agent_memory.model_providers import ModelAdapter
-import command_agent_memory.model_providers as registry
-from command_agent_memory.pipeline_config import StageRuntime
+from command_agent_memory.model_execution.provider_registry import ModelAdapter
+import command_agent_memory.model_execution.provider_registry as registry
+from command_agent_memory.model_execution.stage_runner import StageRuntime
 from command_agent_memory.memory_pipeline import run_pipeline
-from command_agent_memory.conversation_history import load_history_source, read_jsonl
-from command_agent_memory import conversation_history as history
-from command_agent_memory.memory.file_storage import FileMemoryStore, MemoryLayout
+from command_agent_memory.history_sources.conversation_history import load_history_source, read_jsonl
+from command_agent_memory.history_sources import conversation_history as history
+from command_agent_memory.memory_storage.file_storage import FileMemoryStore
+from command_agent_memory.memory_storage.memory_layout import MemoryLayout
+from command_agent_memory.team_memory_delivery.local_copy import sync_team_memory
 
 
 def write_jsonl(path: Path, records: list[dict]) -> None:
@@ -107,6 +109,8 @@ class ConnectionTests(unittest.TestCase):
             materials = (prefix.parent / "materials.md").read_text(encoding="utf-8")
             self.assertIn("Сохранённая процедура", materials)
             self.assertNotIn("Уточнённые правила", materials)
+            self.assertIn("/after/notes/howto.md", materials)
+            self.assertNotIn("/after/knowledge/notes/howto.md", materials)
             (cwd / "memory/INDEX.md").write_text("Командный индекс", encoding="utf-8")
             return json.dumps({"decision": "accepted", "summary": "Знания объединены", "findings": []})
         return "Извлечённые сведения"
@@ -174,7 +178,7 @@ class ConnectionTests(unittest.TestCase):
         module = "connection_test_extension"
         (self.root / (module + ".py")).write_text(
             '\"\"\"Пример подключения собственного источника без новых функций.\"\"\"\n'
-            'from command_agent_memory.conversation_history import RecordSource, register_history_source\n'
+            'from command_agent_memory.history_sources.conversation_history import RecordSource, register_history_source\n'
             'register_history_source("custom_history", RecordSource)\n', encoding="utf-8")
         self.configuration["extensions"] = [module]
         self.configuration["users"][0]["source"]["type"] = "custom_history"
@@ -214,6 +218,67 @@ class ConnectionTests(unittest.TestCase):
         self.execute()
         self.assertEqual(len(self.calls), 6)
 
+    def test_team_delivery_preserves_personal_memory_and_recovers_on_repeat(self):
+        """Без входов проверяет доставку A → B, сохранность личного и восстановление копии."""
+        recipient = self.root / "bob"
+        recipient.mkdir()
+        (recipient / "AGENTS.md").write_bytes(b"bob rules")
+        self.configuration["team"] = {"root": "agent/shared", "workspaces": ["bob"]}
+        self.execute()
+        target = recipient / "team_knowledge/INDEX.md"
+        self.assertEqual(target.read_text(encoding="utf-8"), "Командный индекс")
+        self.assertFalse((recipient / "team_knowledge/CLAUDE.md").exists())
+        target.write_bytes(b"broken copy")
+        stale = recipient / "team_knowledge/stale.md"
+        stale.write_bytes(b"obsolete")
+        self.execute()
+        self.assertEqual(len(self.calls), 6)
+        self.assertEqual(target.read_text(encoding="utf-8"), "Командный индекс")
+        self.assertFalse(stale.exists())
+        self.assertEqual((recipient / "AGENTS.md").read_bytes(), b"bob rules")
+        deliveries = list((self.target / ".memory-runs/team-runs").glob("*/delivery/status.json"))
+        self.assertEqual(len(deliveries), 2)
+        self.assertTrue(all(json.loads(path.read_text(encoding="utf-8"))["snapshot_sha256"]
+                            for path in deliveries))
+
+    def test_invalid_team_delivery_fails_before_models_and_writes(self):
+        """Без входов проверяет пересечения, дубли, отсутствующие каталоги и режим validate-only."""
+        for recipients in (["agent", "agent"], ["absent"], "agent", ["agent"]):
+            with self.subTest(recipients=recipients):
+                self.configuration["team"] = {"root": "agent/team_knowledge", "workspaces": recipients}
+                with self.assertRaises(ValueError):
+                    self.execute(validate_only=True)
+        self.configuration["team"] = {"root": "shared", "workspaces": ["agent"]}
+        self.execute(validate_only=True)
+        self.assertEqual(self.calls, [])
+        self.assertFalse((self.target / "team_knowledge").exists())
+        self.assertFalse((self.target / ".memory-runs").exists())
+        self.configuration["team"]["workspaces"] = ["agent", "agent"]
+        with self.assertRaises(ValueError):
+            self.execute(validate_only=True)
+
+    def test_rejected_team_update_is_not_delivered(self):
+        """Без входов проверяет, что отказ команды сохраняет прежнюю копию получателя."""
+        copy = self.target / "team_knowledge"
+        copy.mkdir()
+        (copy / "INDEX.md").write_bytes(b"previous team version")
+        self.configuration["team"] = {"root": "shared", "workspaces": ["agent"]}
+        with patch("command_agent_memory.memory_update.team_memory_update.consolidate_team_memory",
+                   side_effect=RuntimeError("Командное объединение не принято")):
+            with self.assertRaisesRegex(RuntimeError, "не принято"):
+                self.execute()
+        self.assertEqual((copy / "INDEX.md").read_bytes(), b"previous team version")
+
+    def test_delivery_without_index_does_not_erase_existing_copy(self):
+        """Без входов проверяет отказ для неполного источника без удаления прежних знаний."""
+        copy = self.target / "team_knowledge"
+        copy.mkdir()
+        (copy / "INDEX.md").write_bytes(b"previous team version")
+        with self.assertRaisesRegex(ValueError, "INDEX.md"):
+            sync_team_memory(self.root / "absent", self.target, self.root / "delivery")
+        self.assertEqual((copy / "INDEX.md").read_bytes(), b"previous team version")
+        self.assertFalse((self.root / "delivery").exists())
+
     @unittest.skipUnless(importlib.util.find_spec("langchain_core"), "Нужен langchain-core для диалога")
     def test_replay_has_independent_agent_tester_and_judge(self):
         """Без входов проверяет модели всех ходов диалога, пожелания и изоляцию эталона."""
@@ -236,6 +301,8 @@ class ConnectionTests(unittest.TestCase):
         state = json.loads(states[0].read_text(encoding="utf-8"))
         self.assertEqual((state["state"], state["replay_status"], state["replay_choice"]),
                          ("published", "completed", "candidate"))
+        initialization = json.loads((states[0].parent / "replay/result/initialization.json").read_text(encoding="utf-8"))
+        self.assertEqual(initialization["system_prompt_source"], "configured_provider")
 
 
 class HistoryTests(unittest.TestCase):
@@ -342,12 +409,12 @@ class HistoryTests(unittest.TestCase):
         """Без входов проверяет пагинацию REST и отказ при повторяющемся курсоре."""
         source = load_history_source({"type": "phoenix", "url": "https://example.test", "project": "my project"}, Path.cwd())
         span = {"context": {"trace_id": "t", "span_id": "s"}, "attributes": {}}
-        with patch("command_agent_memory.conversation_history.request_json", side_effect=[
+        with patch("command_agent_memory.history_sources.conversation_history.request_json", side_effect=[
                 {"data": [span], "next_cursor": "next"}, {"data": [], "next_cursor": None}]) as request:
             self.assertEqual(len(source.list_sessions()), 1)
             self.assertIn("my%20project", request.call_args_list[0].args[1])
             self.assertIn("cursor=next", request.call_args_list[1].args[1])
-        with patch("command_agent_memory.conversation_history.request_json", return_value={"data": [], "next_cursor": "same"}):
+        with patch("command_agent_memory.history_sources.conversation_history.request_json", return_value={"data": [], "next_cursor": "same"}):
             with self.assertRaisesRegex(ValueError, "повторил курсор"):
                 source.list_sessions()
 
@@ -356,7 +423,7 @@ class HistoryTests(unittest.TestCase):
         source = load_history_source({"type": "gigaagent", "url": "https://example.test/api", "thread_ids": ["a/b"]}, Path.cwd())
         head = {"checkpoint": {"checkpoint_id": "a"}, "parent_checkpoint": {"checkpoint_id": "missing"},
                 "values": {"messages": [{"id": "u", "content": "Вопрос"}]}}
-        with patch("command_agent_memory.conversation_history.request_json", side_effect=[[head], []]) as request:
+        with patch("command_agent_memory.history_sources.conversation_history.request_json", side_effect=[[head], []]) as request:
             with self.assertRaisesRegex(ValueError, "Неполная"):
                 list(source.iter_events(source.list_sessions()[0]))
             self.assertEqual(request.call_args_list[0].args[1], "threads/a%2Fb/history")
