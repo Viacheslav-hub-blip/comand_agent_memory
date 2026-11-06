@@ -5,6 +5,7 @@ test_decode_shell_output_cp866 — проверка консольной код�
 test_invalid_virtual_path_returns_tool_error — восстановимая ошибка пути;
 test_valid_virtual_path_is_writable — сохранение записи внутри области.
 test_timeout_terminates_python_child — тайм-аут с завершением дочернего процесса.
+test_native_windows_paths — чтение и запись native-путей через /drives/C/... .
 """
 import unittest
 import ctypes
@@ -46,6 +47,19 @@ class RobustLocalShellTests(unittest.TestCase):
             result = backend.write("/outputs/result.txt", "Данные")
             self.assertIsNone(result.error)
             self.assertEqual((Path(directory) / "outputs/result.txt").read_text(encoding="utf-8"), "Данные")
+
+    @unittest.skipUnless(os.name == "nt", "Проверяется представление дисков Windows")
+    def test_native_windows_paths(self) -> None:
+        """Принимает Windows-пути через /drives; проверяет чтение и запись в native-режиме."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "input.txt").write_text("Исходные данные", encoding="utf-8")
+            backend = RobustLocalShellBackend(root_dir=root, virtual_mode=False)
+            alias = "/drives/" + root.drive[0] + root.as_posix()[2:]
+            self.assertIsNone(backend.read(alias + "/input.txt").error)
+            self.assertIsNone(backend.write(alias + "/outputs/result.txt", "Результат").error)
+            self.assertEqual((root / "outputs/result.txt").read_text(encoding="utf-8"), "Результат")
+            self.assertIsNotNone(backend.read("/drives/invalid/input.txt").error)
 
     @unittest.skipUnless(os.name == "nt", "Проверяется дерево процессов Windows")
     def test_timeout_terminates_python_child(self) -> None:

@@ -1,4 +1,4 @@
-"""Проверяет один прогон, решение оценщика и запрет переноса при отказе.
+"""Проверяет парные прогоны, решение оценщика и запрет переноса при отказе.
 
 Вход: временные сценарии и ответы процессов. Выход: unittest без сетевых запросов.
 Класс ReplayEvaluationTests: setUp, tearDown — файлы; prepare, review, worker,
@@ -11,14 +11,17 @@ test_loader_rejects_overlapping_inputs, test_loader_requires_reference_answer,
 проверки отсутствующих данных — сценарии принятия и отказа.
 check_replay_data проверяется отсутствующим сценарием, отсутствием реплик и ошибкой чтения.
 Класс ReplayMetricsTests проверяет callbacks и токены.
+test_evaluation_packet_preserves_answers_and_marks_omitted_files проверяет
+полноту основных материалов и явное обозначение пропущенных приложений.
 """
 import importlib.util
+from dataclasses import replace
 import json
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import command_agent_memory.memory_replay.replay_evaluation as replay
 import command_agent_memory.memory_replay.replay_scenario as scenarios
@@ -49,6 +52,7 @@ class ReplayEvaluationTests(unittest.TestCase):
         (self.reference / "answer.md").write_bytes(b"old answer")
         self.scenario_path = self.root / "scenario.json"
         self.scenario_path.write_text(json.dumps({
+            "agent": {"factory": "worker_fixture:create_session"},
             "request": "Реши задачу и запиши output.txt", "messages": ["Реши задачу и запиши output.txt"], "inputs": "inputs", "reference": "reference",
         }), encoding="utf-8")
         self.scenario = scenarios.load_replay_scenario(self.scenario_path)
@@ -60,6 +64,7 @@ class ReplayEvaluationTests(unittest.TestCase):
         self.reject_review = False
         self.mutate_memory = False
         self.reviewed_memory = None
+        self.baseline_state = "completed"
 
     def tearDown(self):
         """Без входов освобождает временную область; возвращает None."""
@@ -73,6 +78,26 @@ class ReplayEvaluationTests(unittest.TestCase):
             replay.parse_replay_decision(reply),
             {"choice": "candidate", "summary": "Новый результат лучше"},
         )
+
+    def test_evaluation_packet_preserves_answers_and_marks_omitted_files(self):
+        """Без входов собирает ответы и приложения; проверяет точность и обозначение пропусков."""
+        result = self.root / "result"
+        result.mkdir()
+        (result / "answer.md").write_text("Новый ответ: 97", encoding="utf-8")
+        (result / "metrics.json").write_text('{"user_turns":1,"usage":null}', encoding="utf-8")
+        (self.inputs / "large.txt").write_text("x" * 3000, encoding="utf-8")
+        (self.inputs / "binary.bin").write_bytes(b"\xff\x00")
+        packet = json.loads(replay.build_evaluation_packet(self.root, self.scenario, text_limit=2000))
+        documents = {item["path"]: item for item in packet["documents"]}
+        self.assertEqual(packet["messages"], list(self.scenario.messages))
+        self.assertEqual(documents[(self.reference / "answer.md").as_posix()]["text"], "old answer")
+        self.assertEqual(documents[(result / "answer.md").as_posix()]["text"], "Новый ответ: 97")
+        self.assertIsNone(json.loads(documents[(result / "metrics.json").as_posix()]["text"])["usage"])
+        self.assertEqual(documents[(self.inputs / "input.txt").as_posix()]["text"], "original input")
+        for name in ("large.txt", "binary.bin"):
+            item = documents[(self.inputs / name).as_posix()]
+            self.assertIn("omitted", item)
+            self.assertNotIn("text", item)
 
     def prepare(self, target, stage, materials, instructions_path, executable, model, run, knowledge_materials):
         """Принимает параметры подготовки; создаёт предложение без LLM, возвращает MemoryProposal."""
@@ -98,12 +123,13 @@ class ReplayEvaluationTests(unittest.TestCase):
         workspace = Path(command[command.index("--workspace") + 1])
         result = Path(command[command.index("--result") + 1])
         self.assertFalse((workspace / "reference").exists())
-        self.assertEqual(read_memory(workspace, "personal"), self.after)
+        self.assertEqual(read_memory(workspace, "personal"), self.before if workspace.parent.name == "baseline" else self.after)
         self.assertEqual((workspace / "inputs/input.txt").read_bytes(), b"original input")
         result.mkdir()
         (result / "answer.md").write_bytes(b"new answer")
         (result / "metrics.json").write_text(json.dumps({
-            "state": "completed", "duration_seconds": 1, "model_calls": 2,
+            "state": self.baseline_state if workspace.parent.name == "baseline" else "completed",
+            "duration_seconds": 1, "model_calls": 2,
             "tool_calls": 1, "usage": None, "usage_complete": False,
         }), encoding="utf-8")
         (result / "transcript.jsonl").write_text("", encoding="utf-8")
@@ -140,9 +166,9 @@ class ReplayEvaluationTests(unittest.TestCase):
                         )
 
     def test_candidate_publishes(self):
-        """Без входов проверяет перенос только после одного прогона и выбора candidate; возвращает None."""
+        """Без входов проверяет перенос после двух прогонов и выбора candidate; возвращает None."""
         self.execute()
-        self.assertEqual(self.worker_calls, 1)
+        self.assertEqual(self.worker_calls, 2)
         self.assertEqual(self.judge_calls, 1)
         self.assertEqual(read_memory(self.target, "personal"), self.after)
         self.assertEqual(json.loads((self.run / "status.json").read_text())["replay_choice"], "candidate")
@@ -153,20 +179,20 @@ class ReplayEvaluationTests(unittest.TestCase):
         self.run.mkdir()
         proposal = MemoryProposal(self.target, "personal", self.run, self.before, self.after)
         scenario = scenarios.ReplayScenario("Первая реплика", self.inputs, self.reference,
-                                         messages=("Первая реплика", "Уточнение"), goal="Получить результат")
+                                         messages=("Первая реплика", "Уточнение"), goal="Получить результат", agent={"factory": "worker_fixture:create_session"})
 
         def dialogue(workspace, passed_scenario, result, model, **kwargs):
             """Принимает подготовленную копию; создаёт наблюдаемый результат диалога без модели."""
             self.assertEqual(passed_scenario.messages, scenario.messages)
             self.assertEqual(passed_scenario.request, "Первая реплика")
-            self.assertTrue(kwargs["memory_enabled"])
+            self.assertEqual(kwargs["worker_session"].profile["model"], "test-model")
             self.worker(["--workspace", str(workspace), "--result", str(result)])
 
         with patch("command_agent_memory.memory_replay.dialogue_runner.run_dialogue", side_effect=dialogue):
             decision = replay.evaluate_by_replay(proposal, scenario, "", "test-model",
                                                  "101", runner=self.judge)
         self.assertEqual(decision["choice"], "candidate")
-        self.assertEqual(self.worker_calls, 1)
+        self.assertEqual(self.worker_calls, 2)
         self.assertEqual(self.judge_calls, 1)
 
 
@@ -176,7 +202,65 @@ class ReplayEvaluationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "после прогона"):
             self.execute()
         self.assertEqual(read_memory(self.target, "personal"), self.before)
-        self.assertEqual(self.worker_calls, 1)
+        self.assertEqual(self.worker_calls, 2)
+
+    def test_pair_preserves_before_after_and_records_common_profile(self):
+        """Проверяет разные снимки памяти, одинаковые входы и сохранённый профиль парного опыта."""
+        self.execute()
+        directory = self.run / "replay"
+        self.assertEqual(read_memory(directory / "baseline/workspace", "personal"), self.before)
+        self.assertEqual(read_memory(directory / "workspace", "personal"), self.after)
+        comparison = json.loads((directory / "comparison.json").read_text(encoding="utf-8"))
+        self.assertIn("input.txt", comparison["inputs_sha256"])
+        self.assertEqual(len(comparison["agent_profile_sha256"]), 64)
+        self.assertTrue((directory / "baseline/result/files/output.txt").is_file())
+
+    def test_missing_agent_blocks_publication_without_fallback(self):
+        """Убирает подключение рабочего агента; проверяет отказ до выполнения задачи."""
+        self.scenario = replace(self.scenario, agent=None)
+        with self.assertRaisesRegex(ValueError, "agent"):
+            self.execute()
+        self.assertEqual((self.worker_calls, self.judge_calls), (0, 0))
+        self.assertEqual(read_memory(self.target, "personal"), self.before)
+
+    def test_mismatched_profiles_close_both_sessions_before_execution(self):
+        """Меняет профиль инструментов второй сессии; проверяет cleanup и отказ до двух прогонов."""
+        from command_agent_memory.worker_agents import WorkerSession
+        from worker_fixture import profile
+
+        first, second = profile(), profile()
+        second["tools"][0]["schema"] = {"type": "string"}
+        cleanups = [Mock(), Mock()]
+        sessions = [WorkerSession(Mock(), first, cleanups[0]), WorkerSession(Mock(), second, cleanups[1])]
+        with patch.object(replay, "load_worker_session", side_effect=sessions):
+            with self.assertRaisesRegex(RuntimeError, "Профили"):
+                self.execute()
+        self.assertEqual((self.worker_calls, self.judge_calls), (0, 0))
+        for cleanup in cleanups:
+            cleanup.assert_called_once_with()
+        self.assertEqual(read_memory(self.target, "personal"), self.before)
+
+    def test_changed_inputs_block_comparison(self):
+        """Изменяет вход второй копии; проверяет отказ от несопоставимого опыта."""
+        original = replay.prepare_workspace
+
+        def change_inputs(proposal, scenario, destination, memory):
+            """Принимает копию; после подготовки candidate изменяет один входной файл."""
+            original(proposal, scenario, destination, memory)
+            if destination.parent.name == "replay":
+                (destination / "inputs/input.txt").write_bytes(b"different")
+
+        with patch.object(replay, "prepare_workspace", side_effect=change_inputs):
+            with self.assertRaisesRegex(RuntimeError, "Исходные данные"):
+                self.execute()
+        self.assertEqual((self.worker_calls, self.judge_calls), (0, 0))
+
+    def test_incomplete_baseline_can_demonstrate_candidate_quality_gain(self):
+        """Оставляет цель baseline открытой; проверяет возможность оценить завершённый candidate."""
+        self.baseline_state = "inconclusive"
+        self.execute()
+        self.assertEqual((self.worker_calls, self.judge_calls), (2, 1))
+        self.assertEqual(read_memory(self.target, "personal"), self.after)
 
     def test_reviewed_memory_reaches_replay(self):
         """Без входов проверяет прогон и перенос исправленной ревьюером версии; возвращает None."""
@@ -296,6 +380,15 @@ class ReplayEvaluationTests(unittest.TestCase):
 @unittest.skipUnless(importlib.util.find_spec("langchain_core"), "Нужно окружение с LangChain")
 class ReplayMetricsTests(unittest.TestCase):
     """Принимает сценарии unittest; проверяет счётчики и суммирование сообщённого usage."""
+
+    def test_missing_callbacks_do_not_become_zero_cost(self):
+        """Проверяет неизвестные счётчики внешнего агента при отсутствии callbacks."""
+        from command_agent_memory.memory_replay.dialogue_runner import ReplayMetrics, metrics_record
+
+        result = metrics_record(ReplayMetrics(), 1.2, require_observation=True)
+        self.assertIsNone(result["model_calls"])
+        self.assertIsNone(result["tool_calls"])
+        self.assertIsNone(result["usage"])
 
     def test_nested_usage_and_calls(self):
         """Без входов проверяет два запроса модели и вызов инструмента; возвращает None."""

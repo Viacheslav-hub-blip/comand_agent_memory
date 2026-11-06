@@ -12,6 +12,7 @@ from pathlib import Path
 from command_agent_memory.application_config import STAGES, StageSettings, resolve_path
 from command_agent_memory.model_execution.provider_registry import load_model_adapter
 from command_agent_memory.model_execution.execution_policy import execution_policy
+from command_agent_memory.skill_resources import skill_fingerprints
 
 
 def build_prompt(prompt: str, wishes: str) -> str:
@@ -32,10 +33,14 @@ class StageRuntime:
         """Принимает настройки; читает пожелания один раз, создаёт проверенные параметры."""
         defaults = configuration.get("defaults", {})
         stages = configuration.get("stages", {})
+        if isinstance(stages, dict) and "replay_agent" in stages:
+            raise ValueError("Перенесите stages.replay_agent в agent.factory/options сценария: "
+                             "replay использует штатного рабочего агента.")
         if not isinstance(defaults, dict) or not isinstance(stages, dict) or set(stages) - STAGES:
             raise ValueError("Некорректные defaults или имена stages.")
         self.settings = {}
         self.adapters = {}
+        self.skills = skill_fingerprints()
         self.wishes = ""
         if configuration.get("wishes_file") is not None:
             self.wishes = resolve_path(base, configuration["wishes_file"]).read_text(encoding="utf-8-sig")
@@ -89,14 +94,23 @@ class StageRuntime:
         return self.adapters[key]
 
     def fingerprint(self) -> str:
-        """Без входов возвращает SHA-256 настроек и использованного текста пожеланий."""
+        """Без входов возвращает SHA-256 настроек, пожеланий и ресурсов skills.
+
+        Изменение инструкций во время текущего запуска вызывает RuntimeError:
+        результат нельзя пометить версией инструкций, с которыми он не выполнялся.
+        """
+        if skill_fingerprints() != self.skills:
+            raise RuntimeError("Инструкции skills изменились во время запуска; повторите команду.")
         value = {"stages": {key: asdict(value) for key, value in self.settings.items()},
-                 "wishes": self.wishes}
+                 "wishes": self.wishes, "skills": self.skills}
         return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
     def save(self, directory: Path) -> None:
-        """Принимает каталог журнала; сохраняет настройки и снимок пожеланий без секретов."""
+        """Принимает каталог; сохраняет настройки, пожелания и хеши skills без секретов."""
+        self.fingerprint()
         directory.mkdir(parents=True, exist_ok=True)
+        (directory / "skills.json").write_text(json.dumps(
+            self.skills, ensure_ascii=False, indent=2), encoding="utf-8")
         (directory / "wishes.txt").write_text(self.wishes, encoding="utf-8")
         (directory / "stages.json").write_text(json.dumps(
             {key: asdict(value) for key, value in sorted(self.settings.items())},

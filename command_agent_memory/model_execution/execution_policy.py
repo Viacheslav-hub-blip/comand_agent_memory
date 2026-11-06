@@ -14,7 +14,7 @@ import subprocess
 
 @dataclass(frozen=True)
 class ExecutionPolicy:
-    """Принимает абсолютные пути записи, секунды и число вызовов; хранит бюджет задания."""
+    """Принимает пути записи и бюджеты; хранит политику одного модельного задания."""
 
     write_paths: tuple[str, ...] | None = None
     timeout_seconds: int | None = None

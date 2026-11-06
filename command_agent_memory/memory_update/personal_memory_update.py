@@ -131,7 +131,7 @@ def consolidate_with_review(target: Path, stage: str, materials: str, instructio
                     if replay_scenario is None:
                         raise RuntimeError("Для диалогового прогона не предоставлен сценарий.")
                     status.update(replay_status="running", replay=str(run / "replay"))
-                    write_stage_report(run, "replay", "Проверка решением задачи", "running", "Выполняется один прогон.")
+                    write_stage_report(run, "replay", "Проверка решением задачи", "running", "Выполняются два прогона штатного агента.")
                     try:
                         evaluation_arguments = (
                             proposal, replay_scenario, executable, review_model or model,
@@ -160,6 +160,8 @@ def consolidate_with_review(target: Path, stage: str, materials: str, instructio
                 raise RuntimeError("Проверяемая копия изменилась; перенос отменён.")
             if replay_context is not None and report_fingerprint(replay_context) != status["report_fingerprint"]:
                 raise RuntimeError("Аналитические отчёты изменились во время обработки; перенос отменён.")
+            if runtime is not None and runtime.fingerprint() != status["configuration_sha256"]:
+                raise RuntimeError("Настройки этапов изменились во время обработки; перенос отменён.")
             status["snapshot_sha256"] = {
                 name: hashlib.sha256(content).hexdigest() for name, content in proposal.after.items()
             }

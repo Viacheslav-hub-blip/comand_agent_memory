@@ -17,5 +17,11 @@
     "models": [
       "deepseek/deepseek-v4.1-flash"
     ]
+  },
+  "agent": {
+    "factory": "command_agent_memory.working_agent:create_session",
+    "options": {
+      "model": "YOUR_WORKER_MODEL_ID"
+    }
   }
 }

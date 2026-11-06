@@ -13,7 +13,7 @@ from command_agent_memory.skill_resources import ROOT
 
 
 STAGES = frozenset({"context", "procedures", "consolidation", "knowledge", "review",
-                    "replay_agent", "replay_tester", "evaluation", "team"})
+                    "replay_tester", "evaluation", "team"})
 
 
 def read_local_settings() -> dict:

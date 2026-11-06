@@ -101,7 +101,7 @@ class DialogueReplayTests(unittest.TestCase):
         class Tester:
             """Хранит отдельные наблюдения тестировщика вместо сетевых запросов."""
 
-            def __init__(self, scenario, model, directory, artifact_text_limit):
+            def __init__(self, scenario, model, directory, artifact_text_limit, runtime=None):
                 """Принимает закрытый сценарий; создаёт отдельные счётчики тестировщика."""
                 self.metrics = outer.tester_metrics
                 self.duration = 0.0
@@ -114,7 +114,10 @@ class DialogueReplayTests(unittest.TestCase):
                 self.metrics.on_chat_model_start({}, [])
                 return outer.decisions.pop(0)
 
-        with patch.object(self.module, "create_agent", return_value=self.subject) as factory:
+        from command_agent_memory.worker_agents import WorkerSession
+        from worker_fixture import profile
+
+        with patch.object(self.module, "load_worker_session", return_value=WorkerSession(self.subject, profile())) as factory:
             with patch.object(self.module, "OpenRouterTester", Tester):
                 result = self.module.run_dialogue(self.workspace, self.scenario, self.root / "result",
                                                   "test-model", **kwargs)
@@ -123,6 +126,9 @@ class DialogueReplayTests(unittest.TestCase):
 
     def test_separate_messages_skipping_and_context(self):
         """Проверяет точную первую реплику, пропуск уточнения и сохранение экземпляра."""
+        knowledge = self.workspace / "knowledge/wiki/metric.md"
+        knowledge.parent.mkdir(parents=True)
+        knowledge.write_text("Определение доступно в новой памяти", encoding="utf-8")
         result = self.execute()
         actual = [call[0]["messages"][0].content for call in self.subject.calls]
         self.assertEqual(actual, ["Проверь данные", "Посчитай"])
@@ -133,28 +139,25 @@ class DialogueReplayTests(unittest.TestCase):
         transcript = (self.root / "result/transcript.jsonl").read_text(encoding="utf-8")
         self.assertNotIn("ЭТАЛОН_ТОЛЬКО_ТЕСТИРОВЩИКУ", transcript)
         self.assertNotIn("Смысл уже учтён", transcript)
-        self.assertTrue(self.factory_call.kwargs["memory_enabled"])
+        self.assertEqual(self.factory_call.args[1], self.workspace)
         self.assertNotIn("system_prompt", self.factory_call.kwargs)
         initialization = json.loads((self.root / "result/initialization.json").read_text(encoding="utf-8"))
         self.assertIsNone(initialization["system_prompt"])
-        self.assertEqual(initialization["system_prompt_source"], "deepagents_default_with_environment")
+        self.assertEqual(initialization["system_prompt_source"], "worker_agent_factory")
         self.assertTrue(initialization["operating_system"])
         self.assertTrue(initialization["python_version"])
+        self.assertTrue(initialization["host_python_version"])
+        context = {item["path"]: item for item in self.observations[0]["initial_context"]}
+        self.assertEqual(context["knowledge/wiki/metric.md"]["text"], "Определение доступно в новой памяти")
+        self.assertEqual(context["inputs/data.csv"]["text"], (self.workspace / "inputs/data.csv").read_bytes().decode("utf-8"))
+        self.assertNotIn("initial_context", self.observations[1])
+        self.assertNotIn("ЭТАЛОН_ТОЛЬКО_ТЕСТИРОВЩИКУ", json.dumps(context, ensure_ascii=False))
 
-    def test_absent_memory_paths_are_read_only_without_memory(self):
-        """Без памяти проверяет запрет создания отсутствующих AGENTS.md и skills."""
-        from command_agent_memory.model_execution.local_shell import RobustLocalShellBackend
-
-        (self.workspace / "AGENTS.md").unlink()
-        self.execute(memory_enabled=False)
-        paths = self.factory_call.kwargs["read_only_paths"]
-        self.assertIn("/AGENTS.md", paths)
-        self.assertIn("/skills", paths)
-        backend = RobustLocalShellBackend(root_dir=self.workspace, virtual_mode=True, read_only_paths=paths)
-        self.assertIsNotNone(backend.write("/AGENTS.md", "Память").error)
-        self.assertIsNotNone(backend.write("/skills/process/SKILL.md", "Процесс").error)
-        self.assertFalse((self.workspace / "AGENTS.md").exists())
-        self.assertFalse((self.workspace / "skills").exists())
+    def test_original_permissions_are_not_replaced_by_replay(self):
+        """Проверяет подключение исходной фабрики без навязывания новых файловых ограничений."""
+        self.execute()
+        self.assertEqual(self.factory_call.args, (self.scenario.agent, self.workspace, None))
+        self.assertEqual(self.factory_call.kwargs, {})
 
     def test_subject_failure_keeps_trace_and_metrics(self):
         """Прерывает ответ; подтверждает сохранение частичной трассы и отдельный статус сбоя."""

@@ -13,8 +13,8 @@ def describe_execution_environment(workspace: PurePath, *, file_paths: str = "na
     """Принимает каталог, режим путей и доступность shell; возвращает инструкцию о среде.
 
     ОС определяется при каждом запуске, а не берётся из истории пользователя.
-    Режим native использует пути ОС, scoped — файловые инструменты с ограниченной
-    записью, virtual — корень / внутри переданной рабочей области.
+    Режим native использует файловые пути ОС с /drives/C/... для Windows,
+    scoped ограничивает запись, virtual задаёт корень / внутри рабочей области.
     """
     if file_paths not in {"native", "scoped", "virtual"}:
         raise ValueError("Неизвестный режим файловых путей.")
@@ -24,8 +24,9 @@ def describe_execution_environment(workspace: PurePath, *, file_paths: str = "na
              f"Рабочий каталог на машине: {workspace.as_posix()}."]
     if file_paths == "virtual":
         lines.append("Файловые инструменты используют виртуальные пути /...; / соответствует рабочему каталогу.")
-    elif file_paths == "scoped" and system == "Windows":
+    elif system == "Windows":
         lines.append("Файловым инструментам передавай C:/... как /drives/C/...; другие диски аналогично. "
+                     "Относительные пути разрешаются от рабочего каталога. "
                      "Это представление путей инструментов, а не каталог ОС. Не ищи диск через ls.")
     else:
         lines.append("Файловые инструменты используют обычные пути текущей ОС.")

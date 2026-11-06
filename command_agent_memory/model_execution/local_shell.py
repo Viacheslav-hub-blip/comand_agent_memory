@@ -91,10 +91,15 @@ class RobustLocalShellBackend(LocalShellBackend):
     def _resolve_path(self, key: str) -> Path:
         """Принимает путь; возвращает проверенный Path либо файловую ошибку.
 
-        Сохраняет проверку границ родительского backend. Некорректный путь
-        передаётся агенту как ошибка инструмента, чтобы он мог исправить вызов.
+        В native-режиме Windows принимает /drives/C/... . В виртуальном режиме
+        сохраняет границы корня; некорректный путь возвращается как ошибка инструмента.
         """
         try:
+            if not self.virtual_mode and os.name == "nt" and key.startswith("/drives/"):
+                parts = key.split("/")
+                if len(parts) < 4 or len(parts[2]) != 1 or not parts[2].isascii() or not parts[2].isalpha():
+                    raise ValueError("Нужен путь вида /drives/C/каталог/файл.")
+                key = parts[2] + ":/" + "/".join(parts[3:])
             return super()._resolve_path(key)
         except ValueError as error:
             raise OSError(f"{error}. Используй короткий виртуальный путь внутри рабочей области.") from error

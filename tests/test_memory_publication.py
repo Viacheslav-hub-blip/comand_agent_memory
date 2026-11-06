@@ -30,7 +30,6 @@ from unittest.mock import patch
 
 import command_agent_memory.memory_update.personal_memory_update as pipeline
 from command_agent_memory.memory_update import memory_proposal as proposals, memory_review as reviews
-from command_agent_memory.memory_storage import file_storage
 from command_agent_memory.memory_storage.file_storage import publish_memory
 from command_agent_memory.memory_storage.memory_locking import memory_lock
 from command_agent_memory.memory_storage.memory_snapshots import read_memory, write_snapshot
@@ -187,16 +186,17 @@ class ReviewedConsolidationTests(unittest.TestCase):
     def test_publication_exception_restores_originals(self):
         """Без входов имитирует сбой переноса и проверяет восстановление; возвращает None."""
         calls = []
-        replace = os.replace
+        from command_agent_memory.memory_storage import file_transaction
+        replace = file_transaction.install_file
 
-        def fail_once(source, destination):
-            """Принимает пути переноса; один раз вызывает OSError, иначе возвращает результат os.replace."""
-            calls.append((source, destination))
+        def fail_once(path, expected, content, captured):
+            """Принимает замену файла; один раз вызывает OSError, иначе выполняет установку."""
+            calls.append(path)
             if len(calls) == 2:
                 raise OSError("Сбой переноса")
-            return replace(source, destination)
+            return replace(path, expected, content, captured)
 
-        with patch.object(file_storage.os, "replace", side_effect=fail_once):
+        with patch.object(file_transaction, "install_file", side_effect=fail_once):
             with self.assertRaises(OSError):
                 publish_memory(self.target, self.before, self.after, self.stage, self.base / "publication")
         self.assertEqual(read_memory(self.target, self.stage), self.before)
@@ -208,15 +208,16 @@ class ReviewedConsolidationTests(unittest.TestCase):
         after = {"AGENTS.md": b"new rules", "USER_PREFERENCES.md": b"new preferences"}
         write_snapshot(target, before)
         run = self.base / "personal-publication"
-        replace = os.replace
+        from command_agent_memory.memory_storage import file_transaction
+        replace = file_transaction.install_file
 
-        def fail_on_preferences(source, destination):
-            """Принимает пути; вызывает сбой второй записи, иначе возвращает результат os.replace."""
-            if Path(source) == run / "publish/USER_PREFERENCES.md":
+        def fail_on_preferences(path, expected, content, captured):
+            """Принимает замену файла; вызывает сбой новых предпочтений, остальные записи выполняет."""
+            if path.name == "USER_PREFERENCES.md" and content == b"new preferences":
                 raise OSError("Сбой переноса предпочтений")
-            return replace(source, destination)
+            return replace(path, expected, content, captured)
 
-        with patch.object(file_storage.os, "replace", side_effect=fail_on_preferences):
+        with patch.object(file_transaction, "install_file", side_effect=fail_on_preferences):
             with self.assertRaises(OSError):
                 publish_memory(target, before, after, "personal", run)
         self.assertEqual(read_memory(target, "personal"), before)

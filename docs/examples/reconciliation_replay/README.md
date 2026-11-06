@@ -13,6 +13,7 @@ C01 и задаёт цель проверки. Каталог reference соде
 python -m command_agent_memory --config memory_pipeline.json --evaluate-by-replay
 ```
 
-Модели выбираются в конфигурации через replay_agent, replay_tester и evaluation.
+Рабочий агент задаётся полем agent сценария; замените YOUR_WORKER_MODEL_ID.
+Модели тестировщика и оценщика выбираются через replay_tester и evaluation.
 Условия исходного и нового диалога могут различаться; разность времени сама
 по себе не доказывает эффект памяти. [Методика проверки](../../evaluating_memory_with_replay.md).

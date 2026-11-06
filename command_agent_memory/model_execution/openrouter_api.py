@@ -126,6 +126,7 @@ def run_openrouter(_runtime: str, model: str, prompt: str, cwd: Path,
     """Принимает задание Runner; возвращает ответ, ограничивая весь сеанс текущим бюджетом.
 
     При тайм-ауте останавливает дочерний процесс и сохраняет неполный исход.
+    Дочерний процесс работает в UTF-8, включая библиотечные текстовые операции.
     Ключи не сериализуются: дочерний процесс читает обычные локальные настройки.
     """
     policy = current_execution_policy()
@@ -138,7 +139,7 @@ def run_openrouter(_runtime: str, model: str, prompt: str, cwd: Path,
     started = perf_counter()
     try:
         result = run_bounded_process(
-            [sys.executable, "-m", "command_agent_memory.model_execution.openrouter_api"],
+            [sys.executable, "-X", "utf8", "-m", "command_agent_memory.model_execution.openrouter_api"],
             json.dumps(payload), policy.timeout_seconds,
         )
     except subprocess.TimeoutExpired as error:
@@ -195,14 +196,12 @@ def _run_openrouter(_runtime: str, model: str, prompt: str, cwd: Path,
     policy = current_execution_policy()
     if policy.write_paths is not None:
         backend = ScopedFilesystemBackend(cwd, policy.write_paths if writable else ())
+        environment = describe_execution_environment(cwd, file_paths="scoped", shell=False)
     else:
         backend = RobustLocalShellBackend(root_dir=cwd, virtual_mode=False, inherit_env=True)
+        environment = describe_execution_environment(cwd, file_paths="native", shell=True)
     middleware = ([ModelCallLimitMiddleware(run_limit=policy.max_model_calls, exit_behavior="error")]
                   if policy.max_model_calls is not None else [])
-    environment = describe_execution_environment(
-        cwd, file_paths="scoped" if policy.write_paths is not None else "native",
-        shell=policy.write_paths is None,
-    )
     prefix.with_suffix(".environment.md").write_text(environment, encoding="utf-8")
     agent = create_deep_agent(
         model=chat_model,
@@ -228,7 +227,7 @@ def _run_openrouter(_runtime: str, model: str, prompt: str, cwd: Path,
             for event in agent.stream(
                 {"messages": [HumanMessage(content=instruction)]},
                 config={"configurable": {"thread_id": str(uuid4())}, "callbacks": [callback],
-                        "recursion_limit": max(50, policy.max_model_calls * 4) if policy.max_model_calls else 1000},
+                        "recursion_limit": max(100, policy.max_model_calls * 8 + 20) if policy.max_model_calls else 1000},
                 stream_mode="updates",
             ):
                 if not isinstance(event, dict):

@@ -2,8 +2,7 @@
 
 Классы: ReplayMetrics — измерения вызовов и usage; TesterDecision — строгая схема следующего действия;
 OpenRouterTester — отдельный контекст тестировщика и его измерения.
-ConfiguredSubject — диалог через настроенного исполнителя этапа replay_agent.
-Методы OpenRouterTester: __init__, decide; ConfiguredSubject: __init__, stream.
+Методы OpenRouterTester: __init__, decide.
 Функции: parse_tester_decision — разбор ответа; file_hashes — снимок файлов;
 collect_artifacts — сведения о результатах; metrics_record — снимок счётчиков;
 advance_dialogue — проверка перехода; run_dialogue — выполнение полного диалога.
@@ -11,6 +10,7 @@ advance_dialogue — проверка перехода; run_dialogue — вып�
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from hashlib import sha256
 import json
 import platform
@@ -22,7 +22,8 @@ from uuid import uuid4
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, message_to_dict
 from pydantic import BaseModel, ConfigDict, Field
 
-from command_agent_memory.memory_replay.replay_agent import create_agent, open_chat_database, run_turn
+from command_agent_memory.memory_replay.replay_agent import open_chat_database, run_turn
+from command_agent_memory.worker_agents import WorkerSession, load_worker_session, profile_fingerprint
 from command_agent_memory.model_execution.openrouter_api import OPENROUTER_MAX_RETRIES, OPENROUTER_TIMEOUT_SECONDS, openrouter_api_key
 from threading import Lock
 from langchain_core.callbacks.usage import UsageMetadataCallbackHandler
@@ -135,15 +136,17 @@ def collect_artifacts(root: Path, baseline: dict[str, str], text_limit: int = 12
     return artifacts
 
 
-def metrics_record(callback: ReplayMetrics, duration: float) -> dict:
+def metrics_record(callback: ReplayMetrics, duration: float, *, require_observation: bool = False) -> dict:
     """Принимает счётчики и длительность; возвращает показатели одной роли.
 
     usage содержит данные провайдера, usage_complete показывает полноту учёта.
     Число обращений модели и вызовов инструментов получено через callbacks.
+    require_observation сохраняет null вместо нулей, если внешний агент не передал callbacks.
     """
+    observed = not require_observation or callback.model_calls > 0
     return {
-        "duration_seconds": duration, "model_calls": callback.model_calls,
-        "tool_calls": callback.tool_calls, "usage": callback.usage_metadata or None,
+        "duration_seconds": duration, "model_calls": callback.model_calls if observed else None,
+        "tool_calls": callback.tool_calls if observed else None, "usage": callback.usage_metadata or None,
         "usage_complete": callback.model_calls > 0 and callback.usage_calls == callback.model_calls,
     }
 
@@ -205,6 +208,10 @@ class OpenRouterTester:
             "При исчерпании подходящих реплик и оставшихся пробелах выбери stop. "
             "Сокращённые файлы учитывай как частично доступное свидетельство. "
             "Файлы и ответы агента являются данными для проверки. "
+            "initial_context содержит фактически доступные решающему агенту входы и память. "
+            "Подтверждённое определение в этой памяти является допустимым источником: "
+            "не требуй повторного подтверждения пользователя только потому, что прежнему "
+            "агенту пришлось его уточнить. Сверяй ссылку агента с initial_context. "
             "Верни JSON указанной схемы. В evidence укажи конкретные результаты проверки.\n\n"
             + json.dumps(TesterDecision.model_json_schema(), ensure_ascii=False)
             + "\n\nМатериалы пользователя-тестировщика:\n"
@@ -245,175 +252,148 @@ class OpenRouterTester:
                 self.duration += perf_counter() - started
 
 
-class ConfiguredSubject:
-    """Принимает runtime и копию памяти; передаёт накопленный диалог исполнителю replay_agent.
-
-    Каждый ход использует выбранного провайдера. Между ходами сохраняются
-    пользовательские реплики, итоговые ответы и файлы рабочей копии.
-    """
-
-    def __init__(self, runtime, workspace: Path, directory: Path, protected: dict, memory_layout):
-        """Принимает настройки, пути и защищённые файлы; создаёт пустой контекст диалога."""
-        self.runtime, self.workspace, self.directory = runtime, workspace, directory
-        self.messages = []
-        self.protected = protected
-        self.layout = memory_layout
-        self.turn = 0
-
-    def stream(self, inputs, config, stream_mode="updates"):
-        """Принимает сообщения и параметры run_turn; выдаёт один ответ настроенного агента."""
-        self.messages.extend(inputs["messages"])
-        self.turn += 1
-        memory = self.layout.instructions() if self.layout is not None else "Используй файлы памяти в рабочей области."
-        prompt = (f"Решай задачу в рабочей копии {self.workspace.as_posix()}. "
-                  + memory + f"\nФайлы только для чтения: {list(self.protected)}. "
-                  "Не изменяй память и исходные данные. Сохраняй результаты задачи в рабочую область. "
-                  "В диалоге ниже соблюдай порядок и дословный текст пользовательских реплик.\n\n"
-                  + json.dumps([message_to_dict(item) for item in self.messages], ensure_ascii=False))
-        text = self.runtime.run("replay_agent", prompt, self.workspace,
-                                self.directory / f"subject-{self.turn:03d}", agent=True, writable=True)
-        response = AIMessage(content=text)
-        self.messages.append(response)
-        yield {"agent": {"messages": [response]}}
-
-
 def run_dialogue(workspace: Path, scenario: ReplayScenario, result: Path, model: str,
-                 *, user_id: str = "101", memory_enabled: bool = True,
+                 *, user_id: str = "101",
                  tester_model: str | None = None, max_user_turns: int | None = None,
-                 recursion_limit: int = 1000, artifact_text_limit: int = 120_000,
-                 runtime=None, memory_layout=None) -> dict:
+                 recursion_limit: int | None = None, artifact_text_limit: int = 120_000,
+                 runtime=None, memory_layout=None, worker_session: WorkerSession | None = None) -> dict:
     """Принимает чистую область и сценарий; сохраняет диалог и раздельные показатели.
 
     Первый HumanMessage равен первой исходной реплике. Один экземпляр решающего
     агента и его thread_id сохраняются на весь диалог. Тестировщик выбирает
     последующие реплики по ответам. Возвращает metrics.json; сбой сохраняет
     частичный журнал и передаёт исключение вызывающему коду.
-    runtime включает выбор провайдеров и пожелания; memory_layout перечисляет
+    runtime выбирает модели тестировщика и оценщика; worker_session содержит
+    штатного агента, который сохраняет контекст всех ходов. memory_layout перечисляет
     защищённые файлы памяти подключённого агента.
+    Первое наблюдение тестировщика включает исходные файлы памяти и входов,
+    чтобы он мог проверить источник ответа без необоснованного нового уточнения.
     """
     if not scenario.messages or scenario.request != scenario.messages[0]:
         raise ValueError("Для диалога нужны отдельные сообщения и точная первая реплика.")
     if scenario.reference is None or scenario.inputs is None:
         raise ValueError("Для диалога нужны каталоги эталона и исходных данных.")
     limit = len(scenario.messages) if max_user_turns is None else max_user_turns
-    if limit < 1 or recursion_limit < 1 or artifact_text_limit < 1:
+    if limit < 1 or (recursion_limit is not None and recursion_limit < 1) or artifact_text_limit < 1:
         raise ValueError("Лимиты реплик, шагов и символов должны быть положительными.")
     workspace, result = workspace.resolve(), result.resolve()
     if workspace == result or result.is_relative_to(workspace) or workspace.is_relative_to(result):
         raise ValueError("Рабочая область и журнал должны находиться раздельно.")
     result.mkdir(parents=True, exist_ok=False)
     baseline = file_hashes(workspace)
+    initial_context = collect_artifacts(workspace, {}, artifact_text_limit)
     observed_files = baseline
     memory_entries = {"AGENTS.md", "USER_PREFERENCES.md", "user_llm_wiki", "knowledge", "skills", "team_knowledge"}
     protected = {path: value for path, value in baseline.items()
-                 if path.split("/")[0] in memory_entries | {scenario.inputs.name}}
+                 if path.split("/")[0] in memory_entries}
     if memory_layout is not None:
         from command_agent_memory.memory_storage.file_storage import FileMemoryStore
 
         memory_store = FileMemoryStore(workspace, memory_layout.entries)
         protected.update({name: baseline[name] for name in memory_store.snapshot()})
-    (result / "initialization.json").write_text(json.dumps({
-        "model": model, "tester_model": tester_model or model, "memory_enabled": memory_enabled,
-        "workspace": str(workspace), "system_prompt": None,
-        "system_prompt_source": "configured_provider" if runtime is not None else "deepagents_default_with_environment",
-        "operating_system": platform.system(), "python_version": platform.python_version(),
-        "memory_sources": ["/" + path for path in baseline if memory_enabled and
-                           path in ("AGENTS.md", "USER_PREFERENCES.md", "user_llm_wiki/INDEX.md",
-                                    "knowledge/INDEX.md", "team_knowledge/INDEX.md")],
-        "skill_sources": ["/" + name + "/" for name in ("skills", "knowledge/skills", "team_knowledge/skills")
-                          if memory_enabled and (workspace / name).is_dir()],
-        "max_user_turns": limit, "recursion_limit": recursion_limit,
-        "artifact_text_limit": artifact_text_limit,
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
-    callback = ReplayMetrics()
-    tester = None
-    connection = open_chat_database(result / "chat_logs.db")
-    session_id = str(uuid4())
-    started = perf_counter()
-    agent_duration = 0.0
-    state, error, answer = "failed", "", ""
-    turns = []
-    decision = None
-    try:
-        if runtime is not None:
-            agent = ConfiguredSubject(runtime, workspace, result, protected, memory_layout)
+    with ExitStack() as resources:
+        if worker_session is None:
+            worker_session = load_worker_session(scenario.agent, workspace, memory_layout)
+            resources.callback(worker_session.close)
+        model = worker_session.profile["model"]
+        (result / "initialization.json").write_text(json.dumps({
+            "model": model,
+            "tester_model": runtime.settings["replay_tester"].model if runtime is not None else tester_model or model,
+            "memory_enabled": worker_session.profile["environment"].get("memory_enabled"),
+            "workspace": str(workspace), "system_prompt": None,
+            "system_prompt_source": "worker_agent_factory",
+            "agent_profile": worker_session.profile, "agent_profile_sha256": profile_fingerprint(worker_session.profile),
+            "operating_system": worker_session.profile["environment"].get("os"),
+            "python_version": worker_session.profile["environment"].get("python"),
+            "host_operating_system": platform.system(), "host_python_version": platform.python_version(),
+            "memory_sources": ["/" + path for path in baseline if
+                               path in ("AGENTS.md", "USER_PREFERENCES.md", "user_llm_wiki/INDEX.md",
+                                        "knowledge/INDEX.md", "team_knowledge/INDEX.md")],
+            "skill_sources": ["/" + name + "/" for name in ("skills", "knowledge/skills", "team_knowledge/skills")
+                              if (workspace / name).is_dir()],
+            "max_user_turns": limit, "recursion_limit": recursion_limit,
+            "artifact_text_limit": artifact_text_limit,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        callback = ReplayMetrics()
+        tester = None
+        connection = open_chat_database(result / "chat_logs.db")
+        session_id = str(uuid4())
+        started = perf_counter()
+        agent_duration = 0.0
+        state, error, answer = "failed", "", ""
+        turns = []
+        decision = None
+        try:
+            agent = worker_session.agent
             tester = OpenRouterTester(scenario, tester_model or model, result / "tester",
                                       artifact_text_limit, runtime=runtime)
-        else:
-            agent = create_agent(
-                workspace, model_name=model, memory_enabled=memory_enabled,
-                read_only_paths=tuple("/" + path for path in sorted(set(protected) | memory_entries)),
-            )
-            tester = OpenRouterTester(scenario, tester_model or model, result / "tester", artifact_text_limit)
-        message_index = 1
-        with (result / "transcript.jsonl").open("w", encoding="utf-8") as trace:
-            while True:
-                text = scenario.messages[message_index - 1]
-                trace.write(json.dumps(message_to_dict(HumanMessage(content=text)), ensure_ascii=False) + "\n")
-                trace.flush()
-                turn_callback = ReplayMetrics()
-                turn_started = perf_counter()
-                answer = ""
-                try:
-                    for message in run_turn(agent, text, connection, session_id, user_id,
-                                            callbacks=[callback, turn_callback], recursion_limit=recursion_limit):
-                        trace.write(json.dumps(message_to_dict(message), ensure_ascii=False, default=str) + "\n")
-                        trace.flush()
-                        if isinstance(message, AIMessage) and not message.tool_calls:
-                            answer = message.text
-                finally:
-                    duration = perf_counter() - turn_started
-                    agent_duration += duration
-                    turns.append({"source_message_index": message_index, "request": text,
-                                  **metrics_record(turn_callback, duration)})
-                    (result / "turns.json").write_text(json.dumps(turns, ensure_ascii=False, indent=2), encoding="utf-8")
-                if not answer.strip():
-                    raise RuntimeError("Тестируемый агент завершил ход с пустым ответом.")
-                (result / "answer.md").write_text(answer, encoding="utf-8")
-                current = file_hashes(workspace)
-                added_memory = any(path not in baseline and path.split("/")[0] in memory_entries for path in current)
-                if memory_layout is not None:
-                    added_memory = added_memory or any(name not in baseline for name in memory_store.snapshot())
-                if added_memory or any(current.get(path) != digest for path, digest in protected.items()):
-                    raise RuntimeError("Обнаружено изменение исходных данных или памяти.")
-                observation = {
-                    "turn": len(turns), "last_source_message_index": message_index,
-                    "user_message": text, "agent_answer": answer,
-                    "artifacts": collect_artifacts(workspace, observed_files, artifact_text_limit),
-                    "removed_files": sorted(set(observed_files) - set(current)),
-                }
-                decision = tester.decide(observation)
-                observed_files = current
-                with (result / "decisions.jsonl").open("a", encoding="utf-8") as output:
-                    output.write(json.dumps(decision.model_dump(), ensure_ascii=False) + "\n")
-                outcome, following = advance_dialogue(
-                    decision, message_index, len(scenario.messages), len(turns), limit,
-                )
-                if following is None:
-                    state = outcome
-                    break
-                message_index = following
-    except BaseException as failure:
-        error = f"{type(failure).__name__}: {failure}"
-        raise
-    finally:
-        connection.close()
-        metrics = {
-            "state": state, "error": error or None, "backend": "dialogue", "model": model,
-            "duration_seconds": perf_counter() - started, "user_turns": len(turns),
-            **{key: value for key, value in metrics_record(callback, agent_duration).items()
-               if key != "duration_seconds"},
-            "tested_agent": metrics_record(callback, agent_duration),
-            "tester": metrics_record(tester.metrics, tester.duration) if tester else None,
-            "decision": decision.model_dump() if decision else None,
-        }
-        if runtime is not None:
-            metrics.update(model=runtime.settings["replay_agent"].model,
-                           tested_agent={"model_calls": None, "tool_calls": None, "usage": None,
-                                         "usage_complete": False, "duration_seconds": agent_duration},
-                           tester={"model_calls": None, "tool_calls": None, "usage": None,
-                                   "usage_complete": False, "duration_seconds": tester.duration if tester else None},
-                           model_calls=None, tool_calls=None, usage=None, usage_complete=False,
-                           provider_metrics=[str(path) for path in sorted(result.rglob("*.metrics.json"))])
-        (result / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
+            message_index = 1
+            with (result / "transcript.jsonl").open("w", encoding="utf-8") as trace:
+                while True:
+                    text = scenario.messages[message_index - 1]
+                    trace.write(json.dumps(message_to_dict(HumanMessage(content=text)), ensure_ascii=False) + "\n")
+                    trace.flush()
+                    turn_callback = ReplayMetrics()
+                    turn_started = perf_counter()
+                    answer = ""
+                    try:
+                        for message in run_turn(agent, text, connection, session_id, user_id,
+                                                callbacks=[callback, turn_callback], recursion_limit=recursion_limit):
+                            trace.write(json.dumps(message_to_dict(message), ensure_ascii=False, default=str) + "\n")
+                            trace.flush()
+                            if isinstance(message, AIMessage) and not message.tool_calls:
+                                answer = message.text
+                    finally:
+                        duration = perf_counter() - turn_started
+                        agent_duration += duration
+                        turns.append({"source_message_index": message_index, "request": text,
+                                      **metrics_record(turn_callback, duration, require_observation=True)})
+                        (result / "turns.json").write_text(json.dumps(turns, ensure_ascii=False, indent=2), encoding="utf-8")
+                    if not answer.strip():
+                        raise RuntimeError("Тестируемый агент завершил ход с пустым ответом.")
+                    (result / "answer.md").write_text(answer, encoding="utf-8")
+                    current = file_hashes(workspace)
+                    added_memory = any(path not in baseline and path.split("/")[0] in memory_entries for path in current)
+                    if memory_layout is not None:
+                        added_memory = added_memory or any(name not in baseline for name in memory_store.snapshot())
+                    if added_memory or any(current.get(path) != digest for path, digest in protected.items()):
+                        raise RuntimeError("Обнаружено изменение проверяемой памяти.")
+                    observation = {
+                        "turn": len(turns), "last_source_message_index": message_index,
+                        "user_message": text, "agent_answer": answer,
+                        "artifacts": collect_artifacts(workspace, observed_files, artifact_text_limit),
+                        "removed_files": sorted(set(observed_files) - set(current)),
+                    }
+                    if len(turns) == 1:
+                        observation["initial_context"] = initial_context
+                    decision = tester.decide(observation)
+                    observed_files = current
+                    with (result / "decisions.jsonl").open("a", encoding="utf-8") as output:
+                        output.write(json.dumps(decision.model_dump(), ensure_ascii=False) + "\n")
+                    outcome, following = advance_dialogue(
+                        decision, message_index, len(scenario.messages), len(turns), limit,
+                    )
+                    if following is None:
+                        state = outcome
+                        break
+                    message_index = following
+        except BaseException as failure:
+            error = f"{type(failure).__name__}: {failure}"
+            raise
+        finally:
+            connection.close()
+            metrics = {
+                "state": state, "error": error or None, "backend": "dialogue", "model": model,
+                "duration_seconds": perf_counter() - started, "user_turns": len(turns),
+                **{key: value for key, value in metrics_record(callback, agent_duration, require_observation=True).items()
+                   if key != "duration_seconds"},
+                "tested_agent": metrics_record(callback, agent_duration, require_observation=True),
+                "tester": metrics_record(tester.metrics, tester.duration) if tester else None,
+                "decision": decision.model_dump() if decision else None,
+            }
+            if runtime is not None:
+                metrics["tester"] = {"model_calls": None, "tool_calls": None, "usage": None,
+                                     "usage_complete": False, "duration_seconds": tester.duration if tester else None}
+                metrics["provider_metrics"] = [str(path) for path in sorted(result.rglob("*.metrics.json"))]
+            (result / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
     return metrics

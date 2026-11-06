@@ -4,6 +4,8 @@ ExecutionPolicyTests содержит test_context_restores_policy, test_scoped_
 test_process_deadline, test_review_budget_defaults_and_override,
 test_model_call_limit, test_worker_timeout_keeps_metrics, test_timeout_blocks_publication,
 test_windows_tool_paths и test_machine_description_matches_operating_system.
+test_worker_stops_at_model_budget_before_graph_limit проверяет производственный
+граф OpenRouter с повторяющимися вызовами инструментов без сети.
 Вложенные repeat и timed_out имитируют инструмент и исчерпание времени.
 """
 import json
@@ -51,6 +53,8 @@ class ExecutionPolicyTests(unittest.TestCase):
             self.assertIn("Операционная система: Windows", windows)
             self.assertIn("/drives/C/", windows)
             self.assertIn("C:/agents/alice", windows)
+            native = describe_execution_environment(PureWindowsPath("C:/agents/alice"), file_paths="native")
+            self.assertIn("/drives/C/", native)
             virtual = describe_execution_environment(PureWindowsPath("C:/agents/alice"), file_paths="virtual", shell=True)
             self.assertIn("виртуальные пути", virtual)
             self.assertIn("cmd.exe", virtual)
@@ -159,6 +163,29 @@ class ExecutionPolicyTests(unittest.TestCase):
             self.assertFalse(metrics["completed"])
             self.assertEqual(metrics["limit_exceeded"], "timeout")
             self.assertFalse(metrics["usage_complete"])
+
+    def test_worker_stops_at_model_budget_before_graph_limit(self):
+        """Без сети запускает граф с повтором инструмента; проверяет остановку по бюджету модели."""
+        from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+        from langchain_core.messages import AIMessage
+        from langchain.agents.middleware.model_call_limit import ModelCallLimitExceededError
+        from command_agent_memory.model_execution.openrouter_api import _run_openrouter
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            alias = "/drives/" + root.drive[0] + root.as_posix()[2:] if root.drive else root.as_posix()
+            response = AIMessage(content="", tool_calls=[{"id": "again", "name": "ls", "args": {"path": alias}}])
+            model = GenericFakeChatModel(messages=iter([response] * 40))
+            with patch("command_agent_memory.model_execution.openrouter_api.validate_openrouter"), patch(
+                    "command_agent_memory.model_execution.openrouter_api.openrouter_api_key", return_value="test-key"), patch(
+                    "langchain_openai.ChatOpenAI", return_value=model), patch.object(
+                    GenericFakeChatModel, "bind_tools", return_value=model), execution_policy(
+                    write_paths=(), max_model_calls=20):
+                with self.assertRaises(ModelCallLimitExceededError):
+                    _run_openrouter("", "fake-model", "repeat", root, root / "worker")
+            metrics = json.loads((root / "worker.metrics.json").read_text(encoding="utf-8"))
+            self.assertEqual(metrics["limit_exceeded"], "model_calls")
+            self.assertFalse(metrics["completed"])
 
     def test_timeout_blocks_publication(self):
         """Без входов имитирует тайм-аут ревью; проверяет статус failed и прежнюю память."""

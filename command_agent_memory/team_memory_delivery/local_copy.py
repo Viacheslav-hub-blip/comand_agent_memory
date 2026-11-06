@@ -10,6 +10,7 @@ from pathlib import Path
 from command_agent_memory.memory_storage.file_storage import FileMemoryStore, checked_path
 from command_agent_memory.memory_storage.memory_locking import memory_lock
 from command_agent_memory.memory_storage.memory_snapshots import read_memory
+from command_agent_memory.memory_storage.team_registry import REGISTRY_PATH, load_registry, active_documents
 
 
 def sync_team_memory(source: Path, workspace: Path, run: Path) -> None:
@@ -18,6 +19,7 @@ def sync_team_memory(source: Path, workspace: Path, run: Path) -> None:
     Источник, область получателя и журнал могут находиться вне проекта.
     Возвращает None. Синхронизация предназначена для запуска между задачами агента.
     Личные файлы вне team_knowledge/ не изменяются; прежняя копия резервируется.
+    Служебный реестр с pending/conflicts проверяется, но получателю не передаётся.
     """
     source, workspace, run = source.absolute(), workspace.absolute(), run.absolute()
     if not workspace.is_dir() or workspace == Path(workspace.anchor):
@@ -31,6 +33,8 @@ def sync_team_memory(source: Path, workspace: Path, run: Path) -> None:
         raise ValueError("Источник, копия и журнал должны быть раздельными каталогами.")
     with memory_lock(source):
         after = read_memory(source, "knowledge")
+        if REGISTRY_PATH in after:
+            after = active_documents(load_registry(after))
     if "INDEX.md" not in after:
         raise ValueError("В опубликованной командной памяти нужен INDEX.md.")
     store = FileMemoryStore(workspace, ("team_knowledge",))

@@ -11,6 +11,7 @@ import re
 
 from command_agent_memory.skill_resources import ROOT
 from command_agent_memory.memory_storage.memory_layout import PERSONAL_MEMORY_ENTRIES
+from command_agent_memory.worker_agents import validate_agent_spec
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,7 @@ class ReplayScenario:
 
     history указывает на сохранённую историю, resource_notes поясняет затраты.
     messages хранит отдельные пользовательские реплики, goal — цель тестировщика.
+    agent подключает штатную фабрику рабочего агента независимо от моделей анализа.
     Отсутствующие inputs/reference допустимы для оценки, но не для выполнения.
     """
 
@@ -30,6 +32,7 @@ class ReplayScenario:
     resource_notes: str = ""
     messages: tuple[str, ...] = ()
     goal: str = ""
+    agent: dict | None = None
 
 
 def load_user_messages(data: dict, scenario_path: Path, project_root: Path) -> tuple[str, ...]:
@@ -62,8 +65,8 @@ def load_replay_scenario(path: Path, allow_incomplete: bool = False,
 
     Пути inputs и reference разрешаются относительно JSON внутри проекта.
     allowed_root задаёт другую допустимую область для подключённого агента.
-    В режиме allow_incomplete отсутствие запроса, входов или ответа передаётся LLM
-    для оценки. Типы полей и границы путей проверяются в обоих режимах.
+    В режиме allow_incomplete отсутствие запроса, входов или ответа передаётся
+    локальной проверке наличия данных. Типы и границы путей проверяются в обоих режимах.
     """
     path = path.resolve()
     root = (allowed_root or ROOT).resolve()
@@ -114,7 +117,10 @@ def load_replay_scenario(path: Path, allow_incomplete: bool = False,
     goal = data.get("goal", "")
     if not isinstance(goal, str):
         raise ValueError("goal должен быть строкой.")
-    return ReplayScenario(request, inputs, reference, metrics, history, notes, messages, goal)
+    agent = data.get("agent")
+    if agent is not None:
+        validate_agent_spec(agent)
+    return ReplayScenario(request, inputs, reference, metrics, history, notes, messages, goal, agent)
 
 
 def check_replay_data(scenario: ReplayScenario | None) -> dict:

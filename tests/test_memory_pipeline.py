@@ -10,6 +10,7 @@ import io
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import sqlite3
 import sys
 import tempfile
@@ -25,6 +26,7 @@ from command_agent_memory.history_sources import conversation_history as history
 from command_agent_memory.memory_storage.file_storage import FileMemoryStore
 from command_agent_memory.memory_storage.memory_layout import MemoryLayout
 from command_agent_memory.team_memory_delivery.local_copy import sync_team_memory
+import command_agent_memory.skill_resources as skill_resources
 
 
 def write_jsonl(path: Path, records: list[dict]) -> None:
@@ -93,15 +95,11 @@ class ConnectionTests(unittest.TestCase):
                 (self.target / "CLAUDE.md").write_text("Изменено рабочим агентом", encoding="utf-8")
             return json.dumps({"decision": "changes_requested" if self.reject else "accepted",
                                "summary": "Решение проверки", "findings": []})
-        if stage == "replay_agent":
-            self.assertNotIn("SECRET_REFERENCE", prompt)
-            self.assertIn("Первая реплика", prompt)
-            return "Задача решена"
         if stage == "replay_tester":
             count = sum(call[0] == "replay_tester" for call in self.calls)
-            return json.dumps({"action": "send" if count == 1 else "complete",
-                               "message_index": 2 if count == 1 else None, "goal_reached": count > 1,
-                               "summary": "Следующий ход" if count == 1 else "Цель достигнута",
+            return json.dumps({"action": "send" if count % 2 else "complete",
+                               "message_index": 2 if count % 2 else None, "goal_reached": count % 2 == 0,
+                               "summary": "Следующий ход" if count % 2 else "Цель достигнута",
                                "evidence": ["Ответ получен"]})
         if stage == "evaluation":
             return json.dumps({"choice": "candidate", "summary": "Проверка пройдена"})
@@ -111,8 +109,14 @@ class ConnectionTests(unittest.TestCase):
             self.assertNotIn("Уточнённые правила", materials)
             self.assertIn("/after/notes/howto.md", materials)
             self.assertNotIn("/after/knowledge/notes/howto.md", materials)
-            (cwd / "memory/INDEX.md").write_text("Командный индекс", encoding="utf-8")
-            return json.dumps({"decision": "accepted", "summary": "Знания объединены", "findings": []})
+            self.assertFalse(writable)
+            sources = json.loads((prefix.parent / "sources.json").read_text(encoding="utf-8"))
+            return json.dumps({"decision": "accepted", "summary": "Знания объединены", "findings": [],
+                               "updates": [{"id": "procedure", "status": "accepted",
+                                            "statement": "Сохранённая процедура", "conditions": "Условия задачи",
+                                            "reason": "Процедура принята в личном цикле",
+                                            "evidence_ids": list(sources), "conflicts_with": [],
+                                            "documents": {"wiki/procedure.md": "Сохранённая процедура"}}]})
         return "Извлечённые сведения"
 
     def execute(self, **options):
@@ -143,6 +147,82 @@ class ConnectionTests(unittest.TestCase):
         self.execute(validate_only=True)
         self.assertFalse((self.target / ".memory-runs").exists())
         self.assertEqual(self.calls, [])
+
+    def test_skill_changes_invalidate_accepted_run(self):
+        """Без входов меняет копии skill/references; проверяет повторную обработку, возвращает None."""
+        copied = self.root / "copied-skills"
+        shutil.copytree(skill_resources.SKILLS_ROOT, copied)
+        with patch.object(skill_resources, "SKILLS_ROOT", copied):
+            self.execute()
+            for name in ("memory-review/SKILL.md", "knowledge-consolidation/references/skill-authoring.md",
+                         "personal-memory-consolidation/SKILL.md", "team-memory-consolidation/SKILL.md"):
+                resource = copied / name
+                resource.write_text(resource.read_text(encoding="utf-8") + "\nУточнение инструкции.\n", encoding="utf-8")
+                previous = len(self.calls)
+                self.execute()
+                self.assertEqual(len(self.calls), previous + 5)
+            reference = copied / "memory-review/references/new.md"
+            reference.write_text("Дополнительный пример", encoding="utf-8")
+            self.execute()
+            previous = len(self.calls)
+            reference.unlink()
+            self.execute()
+            self.assertEqual(len(self.calls), previous + 5)
+            self.execute()
+            self.assertEqual(len(self.calls), previous + 5)
+
+    def test_skill_change_during_run_stops_execution(self):
+        """Без входов меняет reference после создания runtime; проверяет остановку, возвращает None."""
+        copied = self.root / "copied-skills"
+        shutil.copytree(skill_resources.SKILLS_ROOT, copied)
+        with patch.object(skill_resources, "SKILLS_ROOT", copied):
+            runtime = StageRuntime(self.configuration, self.root)
+            (copied / "memory-review/references/examples.md").write_text("Новая версия", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "изменились во время"):
+                runtime.fingerprint()
+
+    def test_skill_change_after_model_response_prevents_publication(self):
+        """Без входов меняет инструкции после ответа review/team; проверяет отмену переноса, возвращает None."""
+        copied = self.root / "copied-skills"
+        shutil.copytree(skill_resources.SKILLS_ROOT, copied)
+        original_runner = self.runner
+
+        def change_instructions(executable, model, prompt, cwd, prefix, writable=False):
+            """Принимает параметры Runner; возвращает ответ и меняет инструкцию перед переносом."""
+            answer = original_runner(executable, model, prompt, cwd, prefix, writable)
+            stage = json.loads(prefix.with_suffix(".stage.json").read_text(encoding="utf-8"))["stage"]
+            if stage == changed_stage:
+                reference = copied / "memory-review/references/examples.md"
+                reference.write_text(reference.read_text(encoding="utf-8") + "\nНовая инструкция.\n", encoding="utf-8")
+            return answer
+
+        with patch.object(skill_resources, "SKILLS_ROOT", copied), patch.object(self, "runner", change_instructions):
+            changed_stage = "review"
+            with self.assertRaisesRegex(RuntimeError, "изменились во время"):
+                self.execute()
+            self.assertEqual((self.target / "CLAUDE.md").read_text(encoding="utf-8"), "Прежние правила")
+            changed_stage = "team"
+            self.configuration["team"] = {"root": "shared"}
+            with self.assertRaisesRegex(RuntimeError, "изменились во время"):
+                self.execute()
+            self.assertFalse((self.root / "shared/INDEX.md").exists())
+
+    def test_team_skill_change_reprocesses_registry_without_extra_confirmation(self):
+        """Без входов меняет командный skill; проверяет сброс кэша и прежние source-ID, возвращает None."""
+        copied = self.root / "copied-skills"
+        shutil.copytree(skill_resources.SKILLS_ROOT, copied)
+        self.configuration["team"] = {"root": "shared"}
+        with patch.object(skill_resources, "SKILLS_ROOT", copied):
+            self.execute()
+            self.execute()
+            self.assertEqual(len(self.calls), 6)
+            resource = copied / "team-memory-consolidation/SKILL.md"
+            resource.write_text(resource.read_text(encoding="utf-8") + "\nУточнение.\n", encoding="utf-8")
+            self.execute()
+            self.assertEqual(len(self.calls), 12)
+        registry = json.loads((self.root / "shared/.registry/state.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(registry["sources"]), 1)
+        self.assertEqual(len(registry["entries"]["procedure"]["versions"]), 1)
 
     def test_rejection_keeps_original_memory(self):
         """Без входов проверяет сохранность оригиналов после отказа ревью; возвращает None."""
@@ -226,14 +306,15 @@ class ConnectionTests(unittest.TestCase):
         self.configuration["team"] = {"root": "agent/shared", "workspaces": ["bob"]}
         self.execute()
         target = recipient / "team_knowledge/INDEX.md"
-        self.assertEqual(target.read_text(encoding="utf-8"), "Командный индекс")
+        self.assertIn("wiki/procedure.md", target.read_text(encoding="utf-8"))
+        self.assertFalse((recipient / "team_knowledge/.registry").exists())
         self.assertFalse((recipient / "team_knowledge/CLAUDE.md").exists())
         target.write_bytes(b"broken copy")
         stale = recipient / "team_knowledge/stale.md"
         stale.write_bytes(b"obsolete")
         self.execute()
         self.assertEqual(len(self.calls), 6)
-        self.assertEqual(target.read_text(encoding="utf-8"), "Командный индекс")
+        self.assertIn("wiki/procedure.md", target.read_text(encoding="utf-8"))
         self.assertFalse(stale.exists())
         self.assertEqual((recipient / "AGENTS.md").read_bytes(), b"bob rules")
         deliveries = list((self.target / ".memory-runs/team-runs").glob("*/delivery/status.json"))
@@ -287,12 +368,18 @@ class ConnectionTests(unittest.TestCase):
         (self.root / "reference/answer.md").write_text("SECRET_REFERENCE", encoding="utf-8")
         (self.root / "inputs/data.txt").write_text("Данные", encoding="utf-8")
         (self.root / "scenario.json").write_text(json.dumps({"messages": ["Первая реплика", "Вторая реплика"],
-             "inputs": "inputs", "reference": "reference", "goal": "Получить ответ"}), encoding="utf-8")
+             "inputs": "inputs", "reference": "reference", "goal": "Получить ответ",
+             "agent": {"factory": "worker_fixture:create_session", "options": {"model": "original-worker-model"}}}), encoding="utf-8")
         self.configuration["users"][0]["replay_scenario"] = "scenario.json"
-        for name in ("replay_agent", "replay_tester", "evaluation"):
+        for name in ("replay_tester", "evaluation"):
             self.configuration["stages"][name] = {"provider": "fake-b", "model": name + "-model"}
+        import worker_fixture
+        worker_fixture.SESSIONS.clear()
         self.execute(evaluate_by_replay=True)
-        for name, expected_count in (("replay_agent", 2), ("replay_tester", 2), ("evaluation", 1)):
+        self.assertEqual(len(worker_fixture.SESSIONS), 2)
+        self.assertTrue(all(session.agent.requests == ["Первая реплика", "Вторая реплика"]
+                            and session.agent.closed for session in worker_fixture.SESSIONS))
+        for name, expected_count in (("replay_tester", 4), ("evaluation", 1)):
             calls = [call for call in self.calls if call[0] == name]
             self.assertEqual(len(calls), expected_count)
             self.assertTrue(all(call[1:3] == ("fake-b", name + "-model") for call in calls))
@@ -302,7 +389,8 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual((state["state"], state["replay_status"], state["replay_choice"]),
                          ("published", "completed", "candidate"))
         initialization = json.loads((states[0].parent / "replay/result/initialization.json").read_text(encoding="utf-8"))
-        self.assertEqual(initialization["system_prompt_source"], "configured_provider")
+        self.assertEqual(initialization["system_prompt_source"], "worker_agent_factory")
+        self.assertEqual(initialization["model"], "original-worker-model")
 
 
 class HistoryTests(unittest.TestCase):
@@ -449,15 +537,16 @@ class StoreTests(unittest.TestCase):
             (root / "b.md").write_bytes(b"old-b")
             store = FileMemoryStore(root, ("a.md", "b.md"))
             before = store.snapshot()
-            original = store._write
+            from command_agent_memory.memory_storage import file_transaction
+            original = file_transaction.install_file
 
-            def fail_once(name, content):
+            def fail_once(path, expected, content, captured):
                 """Принимает запись; имитирует один сбой b.md, позволяя откат остальных файлов."""
-                if name == "b.md" and content == b"new-b":
+                if path.name == "b.md" and content == b"new-b":
                     raise OSError("Имитированный сбой")
-                original(name, content)
+                original(path, expected, content, captured)
 
-            with patch.object(store, "_write", side_effect=fail_once), self.assertRaises(OSError):
+            with patch.object(file_transaction, "install_file", side_effect=fail_once), self.assertRaises(OSError):
                 store.publish(before, {"a.md": b"new-a", "b.md": b"new-b"}, root / "run")
             self.assertEqual(store.snapshot(), before)
             self.assertEqual((root / "run/external-backup/a.md").read_bytes(), b"old-a")

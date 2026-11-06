@@ -15,7 +15,6 @@ test_reports_record_writer_and_reviewer_changes — отчёты отдельн�
 test_knowledge_cannot_change_rules_without_custom_layout — границы стандартной области.
 """
 import json
-import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -25,7 +24,6 @@ import command_agent_memory.memory_update.personal_memory_update as pipeline
 from command_agent_memory.memory_update import memory_proposal as proposals, memory_review as reviews
 from command_agent_memory.memory_update.memory_proposal import prepare_memory
 from command_agent_memory.memory_update.memory_review import review_memory
-from command_agent_memory.memory_storage import file_storage
 from command_agent_memory.memory_storage.memory_locking import memory_lock
 from command_agent_memory.memory_storage.memory_snapshots import read_memory, write_snapshot
 from command_agent_memory.skill_resources import ROOT
@@ -204,15 +202,16 @@ class PersonalMemoryProposalTests(unittest.TestCase):
 
     def test_knowledge_publication_failure_restores_all_entries(self):
         """Без входов проверяет восстановление четырёх частей памяти при сбое; возвращает None."""
-        replace = os.replace
+        from command_agent_memory.memory_storage import file_transaction
+        replace = file_transaction.install_file
 
-        def fail_on_knowledge(source, destination):
+        def fail_on_knowledge(path, expected, content, captured):
             """Принимает пути; вызывает сбой переноса knowledge, остальные операции выполняет."""
-            if Path(source) == self.run / "publish/knowledge":
+            if path.is_relative_to(self.target / "knowledge") and "captured" in captured.parts:
                 raise OSError("Сбой переноса знаний")
-            return replace(source, destination)
+            return replace(path, expected, content, captured)
 
-        with patch.object(file_storage.os, "replace", side_effect=fail_on_knowledge):
+        with patch.object(file_transaction, "install_file", side_effect=fail_on_knowledge):
             with self.assertRaisesRegex(OSError, "Сбой переноса знаний"):
                 self.execute()
         self.assertEqual(read_memory(self.target, "personal"), self.before)

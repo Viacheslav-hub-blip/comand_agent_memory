@@ -25,11 +25,12 @@ from command_agent_memory.run_reports import create_run_directory
 from command_agent_memory.skill_resources import get_skill_path
 
 
-def validate_users(configuration: dict, base: Path) -> list[dict]:
+def validate_users(configuration: dict, base: Path, *, recover: bool = False) -> list[dict]:
     """Принимает конфигурацию и каталог; возвращает проверенные подключения и источники.
 
     Доступ к истории проверяется до первого изменения файлов. Рабочие журналы
     не должны пересекаться с выбранной памятью или памятью другого пользователя.
+    recover разрешает восстановление прерванной файловой публикации до чтения.
     """
     result, identities = [], set()
     for item in configuration["users"]:
@@ -52,7 +53,10 @@ def validate_users(configuration: dict, base: Path) -> list[dict]:
         store = load_memory_store(memory, base, layout)
         target = (resolve_path(base, memory.get("root")) if memory.get("type", "files") == "files"
                   else workspace / ".memory-store")
-        store.snapshot()
+        if isinstance(store, FileMemoryStore):
+            store.snapshot(recover=recover)
+        else:
+            store.snapshot()
         paths = list(store.protected_paths)
         if workspace == Path(workspace.anchor) or any(
                 path.is_relative_to(workspace) or workspace.is_relative_to(path) for path in paths):
@@ -105,12 +109,13 @@ def validate_users(configuration: dict, base: Path) -> list[dict]:
     return result
 
 
-def validate_team_workspaces(team: dict, base: Path, users: list[dict]) -> list[Path]:
+def validate_team_workspaces(team: dict, base: Path, users: list[dict], *, recover: bool = False) -> list[Path]:
     """Принимает настройки команды, базовый каталог и пользователей; возвращает получателей.
 
     Проверяет существование каталогов, ссылки и пересечения до модельных вызовов.
     Записываемый team_knowledge/ не должен пересекаться с источниками истории,
     личной памятью, журналами, конфигурацией или командным источником. Файлы не создаёт.
+    При recover=True допускается восстановление прежней публикации получателя.
     """
     values = team.get("workspaces", [])
     if not isinstance(values, list):
@@ -132,7 +137,7 @@ def validate_team_workspaces(team: dict, base: Path, users: list[dict]) -> list[
         if any(target.is_relative_to(path.resolve()) or path.resolve().is_relative_to(target)
                for path in [*protected, *targets]):
             raise ValueError("Копия командной памяти пересекается с защищёнными путями.")
-        FileMemoryStore(workspace, ("team_knowledge",)).snapshot()
+        FileMemoryStore(workspace, ("team_knowledge",)).snapshot(recover=recover)
         result.append(workspace)
         targets.append(target)
     return result
@@ -170,14 +175,14 @@ def run_pipeline(path: Path, *, validate_only: bool = False, evaluate_by_replay:
     for name in extensions:
         importlib.import_module(name)
     runtime = StageRuntime(configuration, path.parent)
-    users = validate_users(configuration, path.parent)
+    users = validate_users(configuration, path.parent, recover=not validate_only)
     stages = {"context", "procedures", "review"}
     if any(user["layout"].personal for user in users):
         stages.add("consolidation")
     if any(user["layout"].knowledge for user in users):
         stages.add("knowledge")
     if evaluate_by_replay:
-        stages.update({"replay_agent", "replay_tester", "evaluation"})
+        stages.update({"replay_tester", "evaluation"})
     team = configuration.get("team")
     if team is not None:
         if not isinstance(team, dict) or "root" not in team or set(team) - {"root", "workspaces"}:
@@ -189,9 +194,16 @@ def run_pipeline(path: Path, *, validate_only: bool = False, evaluate_by_replay:
             protected = [user["workspace"], *user["store"].protected_paths]
             if any(team_root.is_relative_to(value) or value.is_relative_to(team_root) for value in protected):
                 raise ValueError("Командная память пересекается с журналами или личной памятью.")
-        team_workspaces = validate_team_workspaces(team, path.parent, users)
+        team_workspaces = validate_team_workspaces(team, path.parent, users, recover=not validate_only)
         stages.add("team")
     runtime.validate(stages, load_providers=not validate_only)
+    if evaluate_by_replay:
+        from command_agent_memory.memory_replay.replay_scenario import check_replay_data
+        from command_agent_memory.worker_agents import validate_agent_spec
+
+        for user in users:
+            if check_replay_data(user["scenario"])["decision"] == "run":
+                validate_agent_spec(user["scenario"].agent)
     if validate_only:
         for user in users:
             for session in user["sessions"]:
@@ -244,7 +256,7 @@ def run_pipeline(path: Path, *, validate_only: bool = False, evaluate_by_replay:
         else:
             run = create_run_directory(team_runs) / "knowledge"
             consolidate_team_memory(team_root, accepted, run, "", "configured", runtime.runner("team"),
-                                    configured=True, configuration_sha256=runtime.fingerprint())
+                                    configured=True, configuration_sha256=runtime.fingerprint(), runtime=runtime)
             runtime.save(run / "configuration")
         for workspace in team_workspaces:
             delivery_run = create_run_directory(team_runs) / "delivery"

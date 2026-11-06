@@ -1,9 +1,11 @@
 """Расположение и чтение встроенных инструкций приложения.
 
-Функции: get_skill_path возвращает путь ресурса; read_stage_instructions читает правила.
+Функции: get_skill_path возвращает путь ресурса; read_stage_instructions читает правила;
+skill_fingerprints возвращает версии встроенных SKILL.md и references.
 ROOT указывает на корень checkout либо текущий каталог установленного пакета.
 SKILLS_ROOT указывает на каталог встроенных скилов внутри пакета.
 """
+import hashlib
 from pathlib import Path
 
 
@@ -35,6 +37,21 @@ def get_skill_path(name: str, resource: str = "SKILL.md") -> Path:
 
 
 KNOWLEDGE_INSTRUCTIONS = get_skill_path("knowledge-consolidation")
+
+
+def skill_fingerprints() -> dict[str, str]:
+    """Без входов возвращает SHA-256 инструкций и references относительно каталога skills.
+
+    Учитывает содержимое, добавление и удаление ресурсов. Ссылки за пределы
+    выбранного скила отклоняются тем же загрузчиком, что используется при запуске.
+    """
+    result = {}
+    for path in sorted(SKILLS_ROOT.rglob("*")):
+        relative = path.relative_to(SKILLS_ROOT)
+        if path.is_file() and (relative.name == "SKILL.md" or "references" in relative.parts[1:]):
+            checked = get_skill_path(relative.parts[0], Path(*relative.parts[1:]).as_posix())
+            result[relative.as_posix()] = hashlib.sha256(checked.read_bytes()).hexdigest()
+    return result
 
 
 def read_stage_instructions(instructions_path: Path) -> str:
