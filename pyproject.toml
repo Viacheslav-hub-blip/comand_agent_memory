@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "command-agent-memory"
+version = "0.3.0rc2"
+description = "Расширяемый конвейер личной и командной памяти агентов"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+openrouter = ["deepagents>=0.7,<0.8", "langchain-openai>=1.2.2,<2"]
+replay = ["deepagents>=0.7,<0.8", "langchain-openai>=1.2.2,<2"]
+zstandard = ["zstandard>=0.22,<1"]
+
+[project.scripts]
+command-agent-memory = "command_agent_memory.__main__:main"
+command-agent-memory-worker = "command_agent_memory.team_worker:main"
+
+[tool.setuptools.packages.find]
+include = ["command_agent_memory*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+command_agent_memory = ["skills/*/SKILL.md", "skills/*/references/*.md", "install-team-worker.ps1"]

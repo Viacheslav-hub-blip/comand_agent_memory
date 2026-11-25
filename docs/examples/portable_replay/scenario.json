@@ -1,0 +1,23 @@
+{
+  "messages": [
+    "По таблице inputs/payments.csv рассчитай L7 для проекта «Маяк» и запиши расчёт и итог в result.md.",
+    "Уточняю определение L7 проекта «Маяк»: сумма amount для status=paid минус сумма amount для status=reversed. Строки pending исключи. Сохрани компоненты и итог в result.md."
+  ],
+  "goal": "В result.md зафиксированы корректные компоненты 150 и 50 и итог L7=100. Строки pending исключены.",
+  "inputs": "inputs",
+  "reference": "reference",
+  "agent": {
+    "factory": "command_agent_memory.working_agent:create_session",
+    "options": {
+      "model": "deepseek/deepseek-v4.1-flash-1017",
+      "model_parameters": {
+        "temperature": 0,
+        "max_tokens": 3000
+      },
+      "run_config": {
+        "recursion_limit": 72
+      },
+      "system_prompt": "Ты формируешь отчёт по запросу пользователя в локальном проекте. Используй файловые инструменты с виртуальными путями от корня рабочей копии. Сначала проверь /AGENTS.md. Если определение запрошенной метрики известно, прочитай CSV, посчитай результат и запиши /result.md. Если определение отсутствует, запроси его одним вопросом перед расчётом. Записывай только /result.md. Сохраняй рабочую память и CSV без изменений."
+    }
+  }
+}

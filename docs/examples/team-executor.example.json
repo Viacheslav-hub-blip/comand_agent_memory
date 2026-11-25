@@ -1,0 +1,13 @@
+{
+  "stages": {
+    "team": {"provider": "codex", "model": "YOUR_MODEL_ID", "timeout_seconds": 300}
+  },
+  "team": {
+    "type": "git",
+    "team_id": "example-team",
+    "repository": "./team-memory.git",
+    "branch": "main",
+    "cache_dir": "./executor-cache",
+    "export_paths": []
+  }
+}
