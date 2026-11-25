@@ -1,0 +1,2 @@
+{"session_id":"demo-session","id":"1","role":"user","content":"Для функций проекта нужны русские docstrings с описанием входов и результатов."}
+{"session_id":"demo-session","id":"2","role":"assistant","content":"Добавлены русские docstrings к функциям обработки файлов."}

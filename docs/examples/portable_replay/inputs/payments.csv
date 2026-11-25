@@ -1,0 +1,6 @@
+id,status,amount
+P01,paid,120
+P02,reversed,45
+P03,pending,70
+P04,paid,30
+P05,reversed,5

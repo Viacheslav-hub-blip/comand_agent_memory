@@ -1,0 +1,167 @@
+{
+  "scope": "offline fixture validation only; no model or memory evaluation",
+  "checked_on": "2026-10-19",
+  "row_counts": {
+    "applications": 8,
+    "decision_events": 13,
+    "payments": 7,
+    "fraud_labels": 7,
+    "rule_hits": 7
+  },
+  "working_scenarios": 8,
+  "user_turns_per_working_scenario": 4,
+  "holdout_scenarios": 4,
+  "foreign_keys": "ok",
+  "sqlite_integrity": "ok",
+  "reference_queries": {
+    "application_states": [
+      {
+        "application_id": "A001",
+        "is_test": 0,
+        "requested_amount_rub": 10000,
+        "status": "approved"
+      },
+      {
+        "application_id": "A002",
+        "is_test": 0,
+        "requested_amount_rub": 20000,
+        "status": "cancelled"
+      },
+      {
+        "application_id": "A003",
+        "is_test": 0,
+        "requested_amount_rub": 15000,
+        "status": "rejected"
+      },
+      {
+        "application_id": "A004",
+        "is_test": 1,
+        "requested_amount_rub": 5000,
+        "status": "approved"
+      },
+      {
+        "application_id": "A005",
+        "is_test": 0,
+        "requested_amount_rub": 12000,
+        "status": "approved"
+      },
+      {
+        "application_id": "A006",
+        "is_test": 0,
+        "requested_amount_rub": 8000,
+        "status": "manual_review"
+      },
+      {
+        "application_id": "A007",
+        "is_test": 0,
+        "requested_amount_rub": 30000,
+        "status": "rejected"
+      },
+      {
+        "application_id": "A008",
+        "is_test": 0,
+        "requested_amount_rub": 7000,
+        "status": "manual_review"
+      }
+    ],
+    "metric_versions": [
+      {
+        "metric": "v1",
+        "numerator": 3,
+        "denominator": 8,
+        "approved_amount_rub": 27000
+      },
+      {
+        "metric": "v2",
+        "numerator": 2,
+        "denominator": 7,
+        "approved_amount_rub": 22000
+      },
+      {
+        "metric": "final_decision_approval_rate",
+        "numerator": 2,
+        "denominator": 4,
+        "approved_amount_rub": 22000
+      }
+    ],
+    "money": [
+      {
+        "population": "real",
+        "disbursement": 42000,
+        "refund": 23000,
+        "net": 19000
+      },
+      {
+        "population": "test",
+        "disbursement": 5000,
+        "refund": 0,
+        "net": 5000
+      }
+    ],
+    "rule_metrics": [
+      {
+        "snapshot": "2026-10-05 00:00:00",
+        "rule_id": "R17",
+        "hits": 4,
+        "tp": 2,
+        "fp": 1,
+        "unknown_count": 1,
+        "cohort_size": 7,
+        "labeled_count": 6,
+        "total_fraud": 3,
+        "precision": 0.6666666666666666,
+        "recall_labeled": 0.6666666666666666,
+        "coverage": 0.5714285714285714
+      },
+      {
+        "snapshot": "2026-10-05 00:00:00",
+        "rule_id": "R42",
+        "hits": 3,
+        "tp": 1,
+        "fp": 2,
+        "unknown_count": 0,
+        "cohort_size": 7,
+        "labeled_count": 6,
+        "total_fraud": 3,
+        "precision": 0.3333333333333333,
+        "recall_labeled": 0.3333333333333333,
+        "coverage": 0.42857142857142855
+      },
+      {
+        "snapshot": "2026-10-07 00:00:00",
+        "rule_id": "R17",
+        "hits": 4,
+        "tp": 1,
+        "fp": 2,
+        "unknown_count": 1,
+        "cohort_size": 7,
+        "labeled_count": 6,
+        "total_fraud": 2,
+        "precision": 0.3333333333333333,
+        "recall_labeled": 0.5,
+        "coverage": 0.5714285714285714
+      },
+      {
+        "snapshot": "2026-10-07 00:00:00",
+        "rule_id": "R42",
+        "hits": 3,
+        "tp": 1,
+        "fp": 2,
+        "unknown_count": 0,
+        "cohort_size": 7,
+        "labeled_count": 6,
+        "total_fraud": 2,
+        "precision": 0.3333333333333333,
+        "recall_labeled": 0.5,
+        "coverage": 0.42857142857142855
+      }
+    ]
+  },
+  "legacy_query_result": {
+    "approved_count": 6,
+    "approved_amount_rub": 85000
+  },
+  "late_load_changed_applications": [
+    "A006"
+  ]
+}

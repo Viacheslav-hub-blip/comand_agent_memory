@@ -1,0 +1,199 @@
+# Расширение проекта
+
+Есть три независимые точки подключения. Пользовательский Python-пакет должен
+устанавливаться в окружение конвейера. JSON явно перечисляет модули регистрации:
+
+```json
+"extensions": ["my_integration.memory_plugin"]
+```
+
+Импорт выполняется и при validate-only. Не запускайте модели, запись или запросы
+к внешним системам при импорте; делайте это в методах адаптера.
+
+## Источник истории
+
+Пример целиком, читающий экспорт неизвестного агента в JSON-массиве:
+
+```python
+"""История внешнего агента из JSON.
+
+Класс ExportHistory: __init__ читает экспорт; list_sessions возвращает сессии;
+iter_events выдаёт сообщения выбранной сессии. Других функций нет.
+"""
+import json
+from pathlib import Path
+
+from command_agent_memory.history_sources.conversation_history import HistoryEvent, register_history_source
+
+
+class ExportHistory:
+    """Принимает настройки экспорта и каталог; предоставляет сессии и события."""
+
+    def __init__(self, options: dict, base: Path):
+        """Принимает path относительно base; читает JSON-массив сообщений, возвращает None."""
+        self.records = json.loads((base / options["path"]).read_text(encoding="utf-8"))
+
+    def list_sessions(self) -> list[dict]:
+        """Без входов возвращает уникальные строковые идентификаторы сессий в порядке экспорта."""
+        return [{"id": value} for value in dict.fromkeys(str(row["chat_id"]) for row in self.records)]
+
+    def iter_events(self, session: dict):
+        """Принимает сессию; выдаёт её сообщения, сохраняя все исходные поля."""
+        for number, row in enumerate(self.records):
+            if str(row["chat_id"]) == session["id"]:
+                yield HistoryEvent("export", session["id"], str(number), "message", row)
+
+
+register_history_source("export", ExportHistory)
+```
+
+Конфигурация источника: `{"type":"export","path":"history.json"}`.
+Реальный адаптер должен проверять формат своего экспорта и возвращать понятные
+ошибки. Методы не должны изменять историю. Не возвращайте пустые или повторные id.
+
+## Исполнитель модели или агента
+
+Импортируйте `ModelAdapter` и `register_model_adapter` из
+`command_agent_memory.model_execution.provider_registry`. Фабрика получает `Path | None` исполняемого файла
+и возвращает `ModelAdapter(name, executable, agent_runner, chat_runner)`.
+
+Оба runner получают аргументы общей сигнатуры:
+
+```python
+def run(executable: str, model: str, prompt: str, cwd: Path,
+        prefix: Path, writable: bool = False) -> str:
+    """Принимает параметры агента; возвращает итоговый текст либо вызывает исключение."""
+    raise NotImplementedError("Реализуйте вызов SDK или CLI вашей системы.")
+```
+
+`cwd` — физическая рабочая область, `prefix` — префикс файлов журнала.
+`agent_runner` должен предоставлять модели чтение файлов и при writable=True
+запись в разрешённую копию. Все модельные этапы вызывают `agent_runner`, включая чтение истории и тестировщика replay. Поле `chat_runner` сохранено для совместимости с адаптерами.
+Сохраняйте prompt, ответ и доступные измерения под `prefix`. Неизвестные измерения
+не заменяйте фиктивными нулями. Секреты берите из окружения.
+
+Регистрация: `register_model_adapter("my_agent", factory)`.
+Выбор: `"defaults":{"provider":"my_agent","model":"my-model"}`.
+Имена встроенных адаптеров перезаписывать нельзя.
+
+## Штатный рабочий агент для replay
+
+Это отдельное подключение от ModelAdapter. В `agent.factory` сценария укажите
+`module:function`. Функция принимает `workspace: Path`, `options: dict`,
+`memory_layout: MemoryLayout | None` и возвращает
+`WorkerSession(agent, profile, cleanup)` из `command_agent_memory.worker_agents`.
+
+`agent.stream(inputs, config, stream_mode="updates")` сохраняет контекст по
+`config["configurable"]["thread_id"]` и выдаёт словари состояний с `messages`
+из объектов LangChain BaseMessage. Для другой платформы фабрика возвращает
+адаптер этого интерфейса, сохраняя оригинальные инструменты и поведение сессии.
+Фабрика используется также обычным рабочим приложением. Подменять инструменты
+упрощённым SDK-набором во время проверки нельзя.
+
+Профиль описывает модель/параметры, хеш базовых инструкций, инструменты с их
+схемами и версиями реализаций, среду и версию агента. Он должен быть несекретным,
+JSON-совместимым, независимым от конкретного пути копии и содержимого памяти.
+Снимки и логические идентификаторы внешних ресурсов отражаются в environment.
+Фабрика сама создаёт независимые ресурсы для каждой копии и возвращает cleanup.
+Настройки options определяет фабрика; ресурсные пути привязывайте к workspace.
+Фабрика создаёт новое состояние без выполнения пользовательской задачи.
+
+Встроенная `command_agent_memory.working_agent.create_session` использует локальный
+DeepAgents с полным набором файловых/shell-инструментов. Дополнительные tools
+передаются общей сборке собственной фабрикой проекта. Локальный shell сохраняет
+права пользователя; копия не ограничивает обращения к внешним путям и системам.
+
+## Хранилище памяти
+
+Контракт находится в `command_agent_memory.memory_storage.storage_registry.MemoryStore`.
+Фабрика `(options: dict, base: Path, layout: MemoryLayout) -> MemoryStore`
+регистрируется через `register_memory_store("my_store", factory)`.
+
+| Элемент | Требование |
+| --- | --- |
+| `identity: str` | Стабильный идентификатор области, без DSN/токенов |
+| `protected_paths: tuple[Path, ...]` | Абсолютные локальные пути данных; пустой кортеж для удалённой системы |
+| `snapshot() -> dict[str, bytes]` | Полный снимок выбранных layout документов без изменения системы |
+| `publish(before, after, run) -> None` | Проверка текущей версии по before и публикация after либо ошибка |
+
+Имена документов — безопасные относительные пути в формате POSIX.
+Проверяйте их через `layout.allows(name)`; не сохраняйте документы вне layout.
+Проверка версии и запись должны выполняться в одной транзакции или через
+условное обновление версии на сервере. При конфликте конвейер должен получить
+исключение, а память — остаться неизменной. Сохраняйте резервную копию before
+в журнале run. Создание адаптера и snapshot не должны создавать БД/таблицы.
+
+В JSON `memory.type` выбирает имя, `personal` и `knowledge` задают layout;
+остальные параметры проверяет ваша фабрика. Например:
+
+```json
+"memory": {
+  "type": "my_store",
+  "collection": "alice-memory",
+  "token_env": "MEMORY_TOKEN",
+  "personal": ["AGENTS.md"],
+  "knowledge": ["notes"]
+}
+```
+
+Образец реализации транзакций —
+[`SQLiteMemoryStore`](../command_agent_memory/memory_storage/sqlite_storage.py).
+Реализация с резервной копией файлов —
+[`FileMemoryStore`](../command_agent_memory/memory_storage/file_storage.py).
+Для чтения памяти самим рабочим агентом используйте его SDK или выберите
+файловый backend с привычным ему файлом инструкций.
+
+## Границы модулей
+
+- memory_pipeline управляет чтением, двумя анализами, консолидацией, ревью и публикацией.
+- application_config проверяет настройки; model_execution.stage_runner выполняет модельные этапы.
+- history_sources получает события; history_analysis извлекает контекст и процедуры.
+- memory_update готовит и проверяет изменения; memory_storage читает и сохраняет документы.
+- team_memory_delivery доставляет командную память через локальные каталоги или Git.
+  Пакет Git проверяется в слое доставки, командное предложение готовит `memory_update`.
+- memory_replay выполняет диалог и сравнение при запрошенной проверке.
+- run_reports оформляет отчёты этапов; history_analysis.analysis_reports проверяет версии анализов.
+
+Программная точка входа — `run_pipeline(path, *, validate_only=False,
+evaluate_by_replay=False, team_mode=None, raise_on_failure=True, configuration=None, replay_factory=None)` из
+`command_agent_memory.memory_pipeline`. Параметр `team_mode` принимает
+`process` или `sync` для Git-команды. При `None` запускаются личные циклы.
+`evaluate_by_replay` доступен в режиме личного обновления. Результат содержит общую сводку,
+личные итоги и командное состояние. При `raise_on_failure=True` первая
+ошибка поднимается после обработки остальных личных циклов. При
+`raise_on_failure=False` ошибки отдельных циклов остаются в сводке, а общие
+ошибки конфигурации по-прежнему поднимаются до запуска. Передайте
+`configuration`, чтобы проверить и выполнить подготовленный словарь настроек.
+В обоих случаях `path.parent` остаётся базовым каталогом для относительных путей.
+Дополнительная `replay_factory(workspace, layout)` подключает две рабочие сессии
+и делает replay обязательным. В скилле Codex фабрика использует штатные сессии;
+`WorkerSession` хранит функцию `turn` для точной реплики и `external_id` для
+проверки независимости. Внешняя сессия сама отвечает за сохранение контекста.
+Схема полного цикла приведена в README. Встроенные скилы хранятся в
+`command_agent_memory/skills/<skill-name>/SKILL.md` и включаются в wheel как данные
+пакета вместе с собственными `references/`. Поле `name` совпадает с именем
+каталога и использует строчные буквы и дефисы. Для получения пути вызывайте
+`get_skill_path(name, resource="SKILL.md")` из `command_agent_memory.skill_resources`.
+
+Локальные блокировки координируют процессы одного устройства. Git-исполнитель
+публикует fast-forward от проверенного базового commit и при обновлении ветки
+заново готовит командное предложение. Штатный агент может закрепить
+доставленную версию через `create_team_session`.
+[Командная интеграция](git_team_memory.md).
+
+Для собственного агента достаточно передать ему путь к доставленному индексу
+и держать контекст `read_team_version` на протяжении задачи. Функция доступна
+без DeepAgents, принимает рабочий каталог и выдаёт SHA доставленной версии.
+Вариант вызова со своим исполнителем:
+
+```python
+from command_agent_memory.team_memory_delivery.git_team import read_team_version
+
+with read_team_version(workspace) as commit:
+    answer = run_agent(request, team_memory_index=workspace / "team_knowledge" / "INDEX.md")
+```
+
+`run_agent` здесь — функция вашего проекта. Вы сами определяете, как передать
+индекс агенту. Контекст удерживает локальную блокировку, сверяет хеши
+и обнаруживает изменение файлов при успешном завершении задачи. Для действий
+через shell и внешние инструменты применяются права вашего раннера.

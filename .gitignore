@@ -1,0 +1,38 @@
+# Локальные настройки и секреты
+local_settings/agent_settings.py
+/memory_pipeline.json
+.env
+.env.*
+!.env.example
+
+# Окружения и кэш Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# Настройки IDE и ОС
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Локальные результаты запусков и временные данные
+/.agent-memory/runs/
+/.agent-memory/knowledge/
+/knowledge/
+/docs/examples/reconciliation_replay/reference/files/synthetic_team/outputs/
+/runs/
+data/
+conversation_history/
+large_tool_results/
+tmp/
+user_workspace/
+/project_archives/
+_tail.txt
+/0
+diagrams/slav4ik-memory.html

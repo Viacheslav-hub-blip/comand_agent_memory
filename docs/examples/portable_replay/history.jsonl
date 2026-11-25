@@ -1,0 +1,3 @@
+{"session_id":"mayak-previous","id":"1","role":"user","content":"Для проекта «Маяк» запомни постоянное определение L7: сумма amount для status=paid минус сумма amount для status=reversed, исключая status=pending. Это правило используем во всех будущих отчётах «Маяка». Сохрани его в AGENTS.md проекта."}
+{"session_id":"mayak-previous","id":"2","role":"assistant","content":"Принято. Для L7 проекта «Маяк» из суммы paid вычитается сумма reversed. Pending не участвуют."}
+{"session_id":"mayak-previous","id":"3","role":"user","content":"Да, формулу и исключение подтвердила. Если в следующих задачах я прошу L7 проекта «Маяк», используй это определение, повторно его уточнять не нужно."}
