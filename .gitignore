@@ -23,6 +23,9 @@ Thumbs.db
 
 # Локальные результаты запусков и временные данные
 /.agent-memory/runs/
+/.agent-memory/knowledge/
+/knowledge/
+/docs/examples/reconciliation_replay/reference/files/synthetic_team/outputs/
 /runs/
 data/
 conversation_history/
