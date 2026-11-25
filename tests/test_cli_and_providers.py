@@ -2,6 +2,7 @@
 
 Класс PackageArchitectureTests проверяет ID запусков, защиту каталогов,
 конфигурационный CLI, фабрику адаптеров и границы загрузки ресурсов скилов.
+Метод test_python_api_rejects_invalid_modes_before_configuration проверяет режимы SDK.
 """
 from datetime import datetime
 from contextlib import redirect_stderr
@@ -14,6 +15,7 @@ from unittest.mock import patch
 from command_agent_memory.model_execution.provider_registry import load_model_adapter
 from command_agent_memory.run_reports import create_run_directory, new_run_id
 from command_agent_memory.__main__ import main
+from command_agent_memory.memory_pipeline import run_pipeline
 from command_agent_memory.skill_resources import get_skill_path
 
 
@@ -29,6 +31,15 @@ class PackageArchitectureTests(unittest.TestCase):
             main(["--user-id", "alice"])
         self.assertEqual(error.exception.code, 2)
 
+    def test_python_api_rejects_invalid_modes_before_configuration(self):
+        """Передаёт несовместимые режимы и проверяет отказ до чтения конфигурации."""
+        with patch("command_agent_memory.memory_pipeline.read_configuration") as loader:
+            with self.assertRaisesRegex(ValueError, "team_mode"):
+                run_pipeline(Path("missing.json"), team_mode="unknown", validate_only=True)
+            with self.assertRaisesRegex(ValueError, "несовместим"):
+                run_pipeline(Path("missing.json"), team_mode="sync", evaluate_by_replay=True)
+        loader.assert_not_called()
+
     def test_run_layout_is_unique_and_non_destructive(self):
         """Проверяет формат ID и запрет повторного использования каталога."""
         identifier = new_run_id(datetime(2026, 10, 25, 12, 30, 45, 123456))
@@ -39,7 +50,6 @@ class PackageArchitectureTests(unittest.TestCase):
             self.assertTrue(created.is_dir())
             with self.assertRaises(FileExistsError):
                 create_run_directory(parent, "fixed")
-
 
     def test_codex_adapter_uses_common_contract(self):
         """Проверяет сборку Codex-адаптера без реального запуска CLI."""

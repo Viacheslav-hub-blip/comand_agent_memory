@@ -14,7 +14,9 @@ python -m command_agent_memory --config memory_pipeline.json
 ```
 
 [Настройка источников](../../configuring_agents_and_databases.md).
-Для проверки по исходным репликам используется [диалоговый сценарий Анны](../reconciliation_replay/dialogue_scenario.json).
+[Диалоговый сценарий Анны](../reconciliation_replay/README.md) использует
+четыре исходные реплики и внешний для репозитория каталог входных данных.
+Для проверки без этого каталога используйте [самостоятельный replay](../portable_replay/README.md).
 
 ## Материалы
 

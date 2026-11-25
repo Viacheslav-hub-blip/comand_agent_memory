@@ -36,7 +36,7 @@ def get_skill_path(name: str, resource: str = "SKILL.md") -> Path:
     return path
 
 
-KNOWLEDGE_INSTRUCTIONS = get_skill_path("knowledge-consolidation")
+KNOWLEDGE_INSTRUCTIONS = SKILLS_ROOT / "knowledge-consolidation" / "SKILL.md"
 
 
 def skill_fingerprints() -> dict[str, str]:

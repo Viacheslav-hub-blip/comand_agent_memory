@@ -1,6 +1,9 @@
 """Проверяет диалог двух агентов на локальных данных без обращения к моделям.
 
-Классы: DialogueScenarioTests — загрузка отдельных реплик;
+Классы: DialogueScenarioTests — отдельные реплики и готовность переносимого примера.
+Методы: test_first_message_is_exact_source, test_portable_replay_has_all_inputs,
+test_team_session_protects_files_and_respects_custom_layout.
+Остальные классы:
 ScriptedSubject — имитация тестируемого агента со stream;
 DialogueReplayTests — изоляция, порядок реплик, завершение, сбои и сборка агента.
 Методы setUp/tearDown готовят и освобождают данные; execute запускает имитацию;
@@ -15,7 +18,7 @@ import unittest
 from unittest.mock import patch
 
 from command_agent_memory.skill_resources import ROOT
-from command_agent_memory.memory_replay.replay_scenario import ReplayScenario, load_replay_scenario
+from command_agent_memory.memory_replay.replay_scenario import ReplayScenario, check_replay_data, load_replay_scenario
 
 
 HAS_RUNTIME = bool(importlib.util.find_spec("langchain_core") and importlib.util.find_spec("deepagents"))
@@ -27,13 +30,19 @@ class DialogueScenarioTests(unittest.TestCase):
     def test_first_message_is_exact_source(self):
         """Загружает сценарий Анны; подтверждает четыре отдельные исходные реплики."""
 
-        scenario = load_replay_scenario(ROOT / "docs/examples/reconciliation_replay/dialogue_scenario.json")
+        scenario = load_replay_scenario(ROOT / "docs/examples/reconciliation_replay/dialogue_scenario.json",
+                                        allow_incomplete=True)
         source = (ROOT / "docs/examples/synthetic_team_dialogues/chats/01-anna-reconciliation.md").read_text(encoding="utf-8")
         self.assertEqual(len(scenario.messages), 4)
         for message in scenario.messages:
             self.assertIn("```text\n" + message + "\n```", source)
         self.assertEqual(scenario.request, scenario.messages[0])
         self.assertNotIn(scenario.messages[1], scenario.request)
+
+    def test_portable_replay_has_all_inputs(self):
+        """Загружает сценарий из репозитория и проверяет готовность входов без модели."""
+        scenario = load_replay_scenario(ROOT / "docs/examples/portable_replay/scenario.json")
+        self.assertEqual(check_replay_data(scenario)["decision"], "run")
 
 
 class ScriptedSubject:
@@ -239,20 +248,50 @@ class DialogueReplayTests(unittest.TestCase):
             self.assertEqual(factory.call_args.kwargs["memory"], [])
             self.assertEqual(factory.call_args.kwargs["skills"], [])
 
+    def test_team_session_protects_files_and_respects_custom_layout(self):
+        """Создаёт штатную сессию и проверяет защищённость индекса и свободу локальной записи."""
+        from command_agent_memory.memory_storage.memory_layout import MemoryLayout
+        from command_agent_memory.team_memory_delivery.contributions import digest
+        from command_agent_memory.working_agent import create_team_session
+
+        root = self.workspace / "team_knowledge"
+        root.mkdir()
+        index = root / "INDEX.md"
+        index.write_bytes(b"Team index")
+        commit = "a" * 40
+        (root / ".team-version.json").write_text(json.dumps({
+            "commit": commit, "document_sha256": {"INDEX.md": digest(index.read_bytes())},
+        }), encoding="utf-8")
+        layout = MemoryLayout(("AGENTS.md",), ("team_knowledge/INDEX.md",))
+        with patch("deepagents.create_deep_agent") as factory, patch("langchain_openai.ChatOpenAI"), patch(
+                "command_agent_memory.model_execution.openrouter_api.openrouter_api_key", return_value="test-key"):
+            with create_team_session(self.workspace, {"model": "test"}, layout) as (_, version):
+                self.assertEqual(version, commit)
+                settings = factory.call_args.kwargs
+                self.assertEqual(settings["memory"], ["/AGENTS.md", "/team_knowledge/INDEX.md"])
+                backend = settings["backend"]
+                self.assertIsNotNone(backend.edit("/team_knowledge/INDEX.md", "Team index", "Modified").error)
+                self.assertIsNotNone(backend.write("/team_knowledge/new.md", "Team file").error)
+                self.assertIsNone(backend.write("/result.md", "Local result").error)
+            self.assertEqual(index.read_bytes(), b"Team index")
+            with self.assertRaisesRegex(RuntimeError, "изменились во время чтения"):
+                with create_team_session(self.workspace, {"model": "test"}, layout):
+                    index.write_bytes(b"External change")
+            with self.assertRaisesRegex(ValueError, "--team-sync"):
+                with create_team_session(self.workspace, {"model": "test"}, layout):
+                    self.fail("Изменённый снимок не должен открываться")
+
     def test_real_tester_has_private_reference_and_continues_context(self):
         """Имитирует только транспорт модели; проверяет закрытый эталон и историю тестировщика."""
-        from langchain_core.messages import AIMessage
-
         inputs = []
 
-        def respond(messages, config):
-            """Запоминает вход отдельной модели; возвращает подготовленный JSON решения."""
-            inputs.append([message.content for message in messages])
-            return AIMessage(content=self.decisions[len(inputs) - 1].model_dump_json())
+        def respond(stage, prompt, directory, prefix):
+            """Принимает задание harness; запоминает сообщения и возвращает решение тестировщика."""
+            self.assertEqual(stage, "replay_tester")
+            inputs.append([message["data"]["content"] for message in json.loads(prompt)])
+            return self.decisions[len(inputs) - 1].model_dump_json()
 
-        with patch("langchain_openai.ChatOpenAI") as factory, patch.object(
-                self.module, "openrouter_api_key", return_value="test-key"):
-            factory.return_value.bind.return_value.invoke.side_effect = respond
+        with patch.object(self.module.StageRuntime, "run", side_effect=respond):
             tester = self.module.OpenRouterTester(self.scenario, "tester-model", self.root / "tester")
             tester.decide({"agent_answer": "Первый ответ"})
             tester.decide({"agent_answer": "Второй ответ"})

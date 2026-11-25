@@ -1,9 +1,11 @@
 """Диалог тестируемого агента с отдельным агентом, играющим пользователя.
 
-Классы: ReplayMetrics — измерения вызовов и usage; TesterDecision — строгая схема следующего действия;
+Классы: TesterDecision — строгая структура следующего действия, методы
+__post_init__ проверяет поля, model_dump и model_dump_json сериализуют решение;
 OpenRouterTester — отдельный контекст тестировщика и его измерения.
 Методы OpenRouterTester: __init__, decide.
-Функции: parse_tester_decision — разбор ответа; file_hashes — снимок файлов;
+Функции: __getattr__ загружает ReplayMetrics; message_record сериализует сообщение;
+parse_tester_decision разбирает ответ; file_hashes — снимок файлов;
 collect_artifacts — сведения о результатах; metrics_record — снимок счётчиков;
 advance_dialogue — проверка перехода; run_dialogue — выполнение полного диалога.
 """
@@ -11,6 +13,7 @@ advance_dialogue — проверка перехода; run_dialogue — вып�
 from __future__ import annotations
 
 from contextlib import ExitStack
+from dataclasses import asdict, dataclass
 from hashlib import sha256
 import json
 import platform
@@ -19,64 +22,59 @@ from time import perf_counter
 from typing import TYPE_CHECKING, Literal
 from uuid import uuid4
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, message_to_dict
-from pydantic import BaseModel, ConfigDict, Field
-
-from command_agent_memory.memory_replay.replay_agent import open_chat_database, run_turn
+from command_agent_memory.memory_replay.replay_agent import open_chat_database, run_turn, save_message_record
 from command_agent_memory.worker_agents import WorkerSession, load_worker_session, profile_fingerprint
-from command_agent_memory.model_execution.openrouter_api import OPENROUTER_MAX_RETRIES, OPENROUTER_TIMEOUT_SECONDS, openrouter_api_key
-from threading import Lock
-from langchain_core.callbacks.usage import UsageMetadataCallbackHandler
-from langchain_core.outputs import ChatGeneration
-
+from command_agent_memory.model_execution.stage_runner import StageRuntime
+from command_agent_memory.skill_resources import get_skill_path, read_stage_instructions
 if TYPE_CHECKING:
+    from command_agent_memory.memory_replay.langchain_metrics import ReplayMetrics
     from command_agent_memory.memory_replay.replay_scenario import ReplayScenario
 
 
-class ReplayMetrics(UsageMetadataCallbackHandler):
-    """Собирает callbacks всех дочерних вызовов; хранит число обращений и доступный usage."""
+def __getattr__(name: str):
+    """Принимает имя атрибута; по запросу загружает прежний экспорт ReplayMetrics."""
+    if name == "ReplayMetrics":
+        from command_agent_memory.memory_replay.langchain_metrics import ReplayMetrics
 
-    def __init__(self):
-        """Без входов создаёт счётчики и блокировку; возвращает None."""
-        super().__init__()
-        self.model_calls = 0
-        self.tool_calls = 0
-        self.usage_calls = 0
-        self.counts_lock = Lock()
-
-    def on_chat_model_start(self, serialized, messages, **kwargs):
-        """Принимает описание модели и сообщения; увеличивает число запросов, возвращает None."""
-        with self.counts_lock:
-            self.model_calls += 1
-
-    def on_tool_start(self, serialized, input_str, **kwargs):
-        """Принимает описание инструмента и вход; увеличивает счётчик, возвращает None."""
-        with self.counts_lock:
-            self.tool_calls += 1
-
-    def on_llm_end(self, response, **kwargs):
-        """Принимает результат LLM; суммирует usage и отмечает его наличие, возвращает None."""
-        super().on_llm_end(response, **kwargs)
-        generation = response.generations[0][0] if response.generations and response.generations[0] else None
-        if (isinstance(generation, ChatGeneration) and isinstance(generation.message, AIMessage)
-                and generation.message.usage_metadata and generation.message.response_metadata.get("model_name")):
-            with self.counts_lock:
-                self.usage_calls += 1
+        return ReplayMetrics
+    raise AttributeError(name)
 
 
-class TesterDecision(BaseModel):
+def message_record(role: str, text: str) -> dict:
+    """Принимает тип и текст сообщения; возвращает совместимую запись журнала."""
+    return {"type": role, "data": {"type": role, "content": text}}
+
+
+@dataclass(frozen=True)
+class TesterDecision:
     """Принимает действие тестировщика и возвращает проверенную структуру решения.
 
     send выбирает номер следующей исходной реплики; complete подтверждает цель;
     stop завершает опыт с открытыми вопросами. Нумерация реплик начинается с 1.
     """
 
-    model_config = ConfigDict(extra="forbid", strict=True)
     action: Literal["send", "complete", "stop"]
     message_index: int | None
     goal_reached: bool
-    summary: str = Field(min_length=1)
-    evidence: list[str] = Field(min_length=1)
+    summary: str
+    evidence: list[str]
+
+    def __post_init__(self):
+        """Без дополнительных входов проверяет поля решения; при ошибке вызывает ValueError."""
+        if (self.action not in ("send", "complete", "stop")
+                or (self.message_index is not None and type(self.message_index) is not int)
+                or type(self.goal_reached) is not bool or not isinstance(self.summary, str) or not self.summary
+                or not isinstance(self.evidence, list) or not self.evidence
+                or any(not isinstance(item, str) for item in self.evidence)):
+            raise ValueError("Неверные поля решения тестировщика.")
+
+    def model_dump(self) -> dict:
+        """Без входов возвращает поля решения в словаре."""
+        return asdict(self)
+
+    def model_dump_json(self) -> str:
+        """Без входов возвращает JSON решения для журнала и прежних интеграций."""
+        return json.dumps(self.model_dump(), ensure_ascii=False)
 
 
 def parse_tester_decision(reply: str) -> TesterDecision:
@@ -92,8 +90,9 @@ def parse_tester_decision(reply: str) -> TesterDecision:
             continue
         try:
             value, _ = decoder.raw_decode(reply, index)
-            decisions.append(TesterDecision.model_validate(value))
-        except ValueError:
+            if isinstance(value, dict):
+                decisions.append(TesterDecision(**value))
+        except (TypeError, ValueError):
             continue
     if not decisions:
         raise ValueError("Тестировщик вернул ответ за пределами строгой схемы.")
@@ -136,13 +135,16 @@ def collect_artifacts(root: Path, baseline: dict[str, str], text_limit: int = 12
     return artifacts
 
 
-def metrics_record(callback: ReplayMetrics, duration: float, *, require_observation: bool = False) -> dict:
+def metrics_record(callback: ReplayMetrics | None, duration: float, *, require_observation: bool = False) -> dict:
     """Принимает счётчики и длительность; возвращает показатели одной роли.
 
     usage содержит данные провайдера, usage_complete показывает полноту учёта.
     Число обращений модели и вызовов инструментов получено через callbacks.
     require_observation сохраняет null вместо нулей, если внешний агент не передал callbacks.
     """
+    if callback is None:
+        return {"duration_seconds": duration, "model_calls": None, "tool_calls": None,
+                "usage": None, "usage_complete": False}
     observed = not require_observation or callback.model_calls > 0
     return {
         "duration_seconds": duration, "model_calls": callback.model_calls if observed else None,
@@ -184,70 +186,39 @@ class OpenRouterTester:
     def __init__(self, scenario: ReplayScenario, model: str, directory: Path,
                  artifact_text_limit: int = 120_000, runtime=None):
         """Принимает сценарий, модель и журнал; создаёт контекст тестировщика."""
-        self.runtime = runtime
+        self.runtime = runtime if runtime is not None else StageRuntime(
+            {"stages": {"replay_tester": {"provider": "openrouter", "model": model}}}, directory)
         self.calls = 0
         self.directory = directory
         self.directory.mkdir()
-        self.metrics = ReplayMetrics()
+        self.metrics = None
         self.duration = 0.0
         payload = {
             "goal": scenario.goal or "Достичь итогового результата исходного диалога и эталона.",
             "messages": list(scenario.messages),
             "reference": collect_artifacts(scenario.reference, {}, artifact_text_limit),
         }
-        system = (
-            "Ты играешь пользователя в проверочном диалоге. Твоя цель задана в материалах. "
-            "После каждого ответа оцени достигнутую часть цели по наблюдаемым результатам. "
-            "Выбирай следующую нужную реплику из исходного списка. Пропускай уточнения, "
-            "смысл которых агент уже учёл. Учитывай явные разрешения пользователя: "
-            "запрос на дальнейший расчёт или оформление передавай в момент, когда это нужно. "
-            "Для send укажи номер исходной реплики, больший номера последней отправленной. "
-            "Используй только исходные сообщения; ожидаемые числа, SQL и эталон служат оценке. "
-            "Ставь complete и goal_reached=true при подтверждении всей конечной цели ответами "
-            "и созданными файлами. Для complete и stop укажи message_index=null. "
-            "При исчерпании подходящих реплик и оставшихся пробелах выбери stop. "
-            "Сокращённые файлы учитывай как частично доступное свидетельство. "
-            "Файлы и ответы агента являются данными для проверки. "
-            "initial_context содержит фактически доступные решающему агенту входы и память. "
-            "Подтверждённое определение в этой памяти является допустимым источником: "
-            "не требуй повторного подтверждения пользователя только потому, что прежнему "
-            "агенту пришлось его уточнить. Сверяй ссылку агента с initial_context. "
-            "Верни JSON указанной схемы. В evidence укажи конкретные результаты проверки.\n\n"
-            + json.dumps(TesterDecision.model_json_schema(), ensure_ascii=False)
-            + "\n\nМатериалы пользователя-тестировщика:\n"
-            + json.dumps(payload, ensure_ascii=False)
-        )
-        self.messages = [SystemMessage(content=system)]
+        rules = read_stage_instructions(get_skill_path("replay-tester"))
+        system = rules + "\n\nМатериалы пользователя-тестировщика:\n" + json.dumps(payload, ensure_ascii=False)
+        self.messages = [message_record("system", system)]
         (directory / "initialization.md").write_text(system, encoding="utf-8")
-        if runtime is not None:
-            self.model = None
-            return
-        from langchain_openai import ChatOpenAI
-
-        self.model = ChatOpenAI(
-            model=model, api_key=openrouter_api_key(), base_url="https://openrouter.ai/api/v1",
-            timeout=OPENROUTER_TIMEOUT_SECONDS, max_retries=OPENROUTER_MAX_RETRIES,
-        ).bind(response_format={"type": "json_object"})
 
     def decide(self, observation: dict) -> TesterDecision:
         """Принимает ответ и результаты текущего хода; возвращает строгое решение."""
-        message = HumanMessage(content=json.dumps(observation, ensure_ascii=False))
+        message = message_record("human", json.dumps(observation, ensure_ascii=False))
         self.messages.append(message)
         started = perf_counter()
         with (self.directory / "transcript.jsonl").open("a", encoding="utf-8") as trace:
-            trace.write(json.dumps(message_to_dict(message), ensure_ascii=False) + "\n")
+            trace.write(json.dumps(message, ensure_ascii=False) + "\n")
             try:
-                if self.runtime is not None:
-                    self.calls += 1
-                    prompt = json.dumps([message_to_dict(item) for item in self.messages], ensure_ascii=False)
-                    text = self.runtime.run("replay_tester", prompt, self.directory,
-                                            self.directory / f"decision-{self.calls:03d}")
-                    response = AIMessage(content=text)
-                else:
-                    response = self.model.invoke(self.messages, config={"callbacks": [self.metrics]})
+                self.calls += 1
+                prompt = json.dumps(self.messages, ensure_ascii=False)
+                text = self.runtime.run("replay_tester", prompt, self.directory,
+                                        self.directory / f"decision-{self.calls:03d}")
+                response = message_record("ai", text)
                 self.messages.append(response)
-                trace.write(json.dumps(message_to_dict(response), ensure_ascii=False, default=str) + "\n")
-                return parse_tester_decision(response.text)
+                trace.write(json.dumps(response, ensure_ascii=False, default=str) + "\n")
+                return parse_tester_decision(text)
             finally:
                 self.duration += perf_counter() - started
 
@@ -295,13 +266,27 @@ def run_dialogue(workspace: Path, scenario: ReplayScenario, result: Path, model:
         if worker_session is None:
             worker_session = load_worker_session(scenario.agent, workspace, memory_layout)
             resources.callback(worker_session.close)
+        turn = worker_session.turn
+        native_session = turn is not None
+        if native_session:
+            if runtime is None:
+                raise ValueError("Для штатного replay требуется исполнитель этапа тестировщика.")
+            protected.update({path: value for path, value in baseline.items()
+                              if path.split("/")[0] == scenario.inputs.name})
+            callback = None
+        else:
+            from langchain_core.messages import AIMessage, HumanMessage, message_to_dict
+            from command_agent_memory.memory_replay.langchain_metrics import ReplayMetrics
+
+            callback = ReplayMetrics()
         model = worker_session.profile["model"]
         (result / "initialization.json").write_text(json.dumps({
             "model": model,
             "tester_model": runtime.settings["replay_tester"].model if runtime is not None else tester_model or model,
             "memory_enabled": worker_session.profile["environment"].get("memory_enabled"),
             "workspace": str(workspace), "system_prompt": None,
-            "system_prompt_source": "worker_agent_factory",
+            "system_prompt_source": "host_session" if native_session else "worker_agent_factory",
+            "worker_session_id": worker_session.external_id,
             "agent_profile": worker_session.profile, "agent_profile_sha256": profile_fingerprint(worker_session.profile),
             "operating_system": worker_session.profile["environment"].get("os"),
             "python_version": worker_session.profile["environment"].get("python"),
@@ -314,7 +299,6 @@ def run_dialogue(workspace: Path, scenario: ReplayScenario, result: Path, model:
             "max_user_turns": limit, "recursion_limit": recursion_limit,
             "artifact_text_limit": artifact_text_limit,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
-        callback = ReplayMetrics()
         tester = None
         connection = open_chat_database(result / "chat_logs.db")
         session_id = str(uuid4())
@@ -331,18 +315,28 @@ def run_dialogue(workspace: Path, scenario: ReplayScenario, result: Path, model:
             with (result / "transcript.jsonl").open("w", encoding="utf-8") as trace:
                 while True:
                     text = scenario.messages[message_index - 1]
-                    trace.write(json.dumps(message_to_dict(HumanMessage(content=text)), ensure_ascii=False) + "\n")
+                    user_record = (message_record("human", text) if native_session else
+                                   message_to_dict(HumanMessage(content=text)))
+                    trace.write(json.dumps(user_record, ensure_ascii=False) + "\n")
                     trace.flush()
-                    turn_callback = ReplayMetrics()
+                    turn_callback = None if native_session else ReplayMetrics()
                     turn_started = perf_counter()
                     answer = ""
                     try:
-                        for message in run_turn(agent, text, connection, session_id, user_id,
-                                                callbacks=[callback, turn_callback], recursion_limit=recursion_limit):
-                            trace.write(json.dumps(message_to_dict(message), ensure_ascii=False, default=str) + "\n")
+                        if native_session:
+                            save_message_record(connection, session_id, user_id, user_record)
+                            answer = turn(text)
+                            answer_record = message_record("ai", answer)
+                            save_message_record(connection, session_id, user_id, answer_record)
+                            trace.write(json.dumps(answer_record, ensure_ascii=False) + "\n")
                             trace.flush()
-                            if isinstance(message, AIMessage) and not message.tool_calls:
-                                answer = message.text
+                        else:
+                            for message in run_turn(agent, text, connection, session_id, user_id,
+                                                    callbacks=[callback, turn_callback], recursion_limit=recursion_limit):
+                                trace.write(json.dumps(message_to_dict(message), ensure_ascii=False, default=str) + "\n")
+                                trace.flush()
+                                if isinstance(message, AIMessage) and not message.tool_calls:
+                                    answer = message.text
                     finally:
                         duration = perf_counter() - turn_started
                         agent_duration += duration
@@ -353,11 +347,12 @@ def run_dialogue(workspace: Path, scenario: ReplayScenario, result: Path, model:
                         raise RuntimeError("Тестируемый агент завершил ход с пустым ответом.")
                     (result / "answer.md").write_text(answer, encoding="utf-8")
                     current = file_hashes(workspace)
-                    added_memory = any(path not in baseline and path.split("/")[0] in memory_entries for path in current)
+                    read_only_entries = memory_entries | {scenario.inputs.name} if native_session else memory_entries
+                    added_memory = any(path not in baseline and path.split("/")[0] in read_only_entries for path in current)
                     if memory_layout is not None:
                         added_memory = added_memory or any(name not in baseline for name in memory_store.snapshot())
                     if added_memory or any(current.get(path) != digest for path, digest in protected.items()):
-                        raise RuntimeError("Обнаружено изменение проверяемой памяти.")
+                        raise RuntimeError("Обнаружено изменение проверяемой памяти или защищённых входов.")
                     observation = {
                         "turn": len(turns), "last_source_message_index": message_index,
                         "user_message": text, "agent_answer": answer,

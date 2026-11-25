@@ -3,7 +3,9 @@
 Классы: ConnectionTests — конфигурация, этапы и публикация;
 HistoryTests — форматы, ветки и ошибки; StoreTests — границы, конкуренция и откат.
 Методы setUp/tearDown готовят окружение; factory/runner имитируют провайдеров;
-write_jsonl создаёт логи; execute запускает цикл; test_* проверяют публичное поведение.
+write_jsonl создаёт логи. execute запускает цикл, test_* проверяют публичное поведение.
+test_rejected_or_failed_first_user_does_not_block_second проверяет независимость
+участников. Вложенная run_stage имитирует отказ или сбой первого цикла.
 """
 from contextlib import closing, redirect_stdout
 import io
@@ -74,7 +76,7 @@ class ConnectionTests(unittest.TestCase):
 
     def factory(self, executable):
         """Принимает необязательный путь CLI; возвращает локальный адаптер без сети."""
-        return ModelAdapter("fake", "", self.runner, self.runner)
+        return ModelAdapter("fake", "", self.runner, self.fail)
 
     def runner(self, executable, model, prompt, cwd, prefix, writable=False):
         """Принимает запрос этапа; обновляет копию либо возвращает отчёт и решение ревью."""
@@ -124,6 +126,43 @@ class ConnectionTests(unittest.TestCase):
         self.path.write_text(json.dumps(self.configuration), encoding="utf-8")
         with redirect_stdout(io.StringIO()):
             run_pipeline(self.path, **options)
+
+    def test_rejected_or_failed_first_user_does_not_block_second(self):
+        """Проверяет отказ и технический сбой первого участника в независимых запусках."""
+        for failed, expected in ((False, "rejected"), (True, "failed")):
+            with self.subTest(result=expected):
+                first = self.configuration["users"][0]
+                second = self.root / expected
+                second.mkdir()
+                (second / "CLAUDE.md").write_text("Правила второго участника.", encoding="utf-8")
+                write_jsonl(second / "history.jsonl", [
+                    {"session_id": expected, "role": "user", "content": "Отдельная задача."},
+                ])
+                self.configuration["users"] = [first, {
+                    "user_id": expected, "workspace": expected + "/runs",
+                    "source": {"type": "jsonl", "path": expected + "/history.jsonl"},
+                    "memory": {"root": expected, "personal": ["CLAUDE.md"], "knowledge": ["notes"]},
+                }]
+                self.configuration["team"] = {"root": "shared-" + expected}
+                self.path.write_text(json.dumps(self.configuration), encoding="utf-8")
+                original = self.runner
+
+                def run_stage(executable, model, prompt, cwd, prefix, writable=False):
+                    """Принимает запрос этапа; отклоняет или прерывает только первый личный цикл."""
+                    stage = json.loads(prefix.with_suffix(".stage.json").read_text(encoding="utf-8"))["stage"]
+                    if stage == "review" and prefix.is_relative_to(self.target):
+                        if failed:
+                            raise OSError("Пробная техническая ошибка.")
+                        return json.dumps({"decision": "changes_requested", "summary": "Отказ", "findings": []})
+                    return original(executable, model, prompt, cwd, prefix, writable)
+
+                with patch.object(self, "runner", run_stage), redirect_stdout(io.StringIO()):
+                    result = run_pipeline(self.path, raise_on_failure=False)
+                self.assertEqual(result["state"], "failed")
+                self.assertEqual([user["state"] for user in result["users"]], [expected, "published"])
+                self.assertEqual((self.target / "CLAUDE.md").read_text(encoding="utf-8"), "Прежние правила")
+                team = json.loads(Path(result["team"]["status_file"]).read_text(encoding="utf-8"))
+                self.assertEqual(team["accepted_runs"], [result["users"][1]["run"]])
 
     def test_complete_cycle_routes_models_and_updates_external_memory(self):
         """Без входов проверяет реальные записи, разные модели и пожелания на всех этапах."""
@@ -515,7 +554,8 @@ class HistoryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Неполная"):
                 list(source.iter_events(source.list_sessions()[0]))
             self.assertEqual(request.call_args_list[0].args[1], "threads/a%2Fb/history")
-            self.assertEqual(request.call_args_list[1].kwargs["body"]["before"], head["checkpoint"])
+            self.assertEqual(request.call_args_list[1].kwargs["body"]["before"],
+                             {"configurable": head["checkpoint"]})
 
 
 class StoreTests(unittest.TestCase):

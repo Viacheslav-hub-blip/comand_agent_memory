@@ -22,12 +22,14 @@ dist/
 Thumbs.db
 
 # Локальные результаты запусков и временные данные
+/.agent-memory/runs/
 /runs/
 data/
 conversation_history/
 large_tool_results/
 tmp/
 user_workspace/
+/project_archives/
 _tail.txt
 /0
 diagrams/slav4ik-memory.html

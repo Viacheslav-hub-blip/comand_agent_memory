@@ -1,8 +1,8 @@
 """Последовательность обработки внешней истории и обновления подключённой памяти.
 
-Функции: validate_users проверяет подключения; validate_team_workspaces проверяет
-получателей командной памяти; accepted_run находит неизменный
-принятый результат; run_pipeline выполняет полный цикл по JSON-конфигурации.
+Функции: accepted_run находит неизменный принятый результат;
+personal_result читает журнал; run_personal обновляет память участника; run_local_team
+объединяет и доставляет локальную память; run_pipeline выполняет выбранный режим.
 Анализ истории, модельные вызовы и сохранение документов выполняют отдельные группы.
 """
 import hashlib
@@ -10,137 +10,18 @@ import importlib
 import json
 from pathlib import Path
 
-from command_agent_memory.application_config import read_configuration, resolve_path
+from command_agent_memory.application_config import read_configuration, validate_configuration
 from command_agent_memory.model_execution.stage_runner import StageRuntime
-from command_agent_memory.history_sources.conversation_history import load_history_source
+from command_agent_memory.connections import validate_users, team_connection
 from command_agent_memory.history_analysis.session_analysis import analyze_source
 from command_agent_memory.history_analysis.analysis_reports import read_reports, report_fingerprint
-from command_agent_memory.memory_update.personal_memory_update import consolidate_with_review
+from command_agent_memory.memory_update.personal_memory_update import consolidate_with_review, MemoryRejected
 from command_agent_memory.memory_storage.memory_locking import memory_lock
-from command_agent_memory.memory_storage.file_storage import FileMemoryStore, checked_path
+from command_agent_memory.memory_storage.file_storage import FileMemoryStore
 from command_agent_memory.team_memory_delivery.local_copy import sync_team_memory
-from command_agent_memory.memory_storage.memory_layout import MemoryLayout
-from command_agent_memory.memory_storage.storage_registry import load_memory_store
 from command_agent_memory.run_reports import create_run_directory
 from command_agent_memory.skill_resources import get_skill_path
-
-
-def validate_users(configuration: dict, base: Path, *, recover: bool = False) -> list[dict]:
-    """Принимает конфигурацию и каталог; возвращает проверенные подключения и источники.
-
-    Доступ к истории проверяется до первого изменения файлов. Рабочие журналы
-    не должны пересекаться с выбранной памятью или памятью другого пользователя.
-    recover разрешает восстановление прерванной файловой публикации до чтения.
-    """
-    result, identities = [], set()
-    for item in configuration["users"]:
-        if not isinstance(item, dict) or set(item) - {"user_id", "workspace", "source", "memory", "replay_scenario"}:
-            raise ValueError("Неизвестные поля подключения пользователя.")
-        identity = item.get("user_id")
-        if not isinstance(identity, str) or not identity or not all(c.isalnum() or c in "_-" for c in identity):
-            raise ValueError("user_id должен содержать буквы, цифры, _ или -.")
-        if identity in identities:
-            raise ValueError(f"Повтор user_id: {identity}")
-        identities.add(identity)
-        workspace = resolve_path(base, item.get("workspace"))
-        memory = item.get("memory")
-        if not isinstance(memory, dict):
-            raise ValueError("memory должен содержать настройки хранилища и списки personal/knowledge.")
-        groups = [memory.get(name, []) for name in ("personal", "knowledge")]
-        if any(not isinstance(group, list) for group in groups):
-            raise ValueError("personal и knowledge должны быть списками путей.")
-        layout = MemoryLayout(*(tuple(group) for group in groups))
-        store = load_memory_store(memory, base, layout)
-        target = (resolve_path(base, memory.get("root")) if memory.get("type", "files") == "files"
-                  else workspace / ".memory-store")
-        if isinstance(store, FileMemoryStore):
-            store.snapshot(recover=recover)
-        else:
-            store.snapshot()
-        paths = list(store.protected_paths)
-        if workspace == Path(workspace.anchor) or any(
-                path.is_relative_to(workspace) or workspace.is_relative_to(path) for path in paths):
-            raise ValueError("Журналы и выбранные файлы памяти должны находиться раздельно.")
-        for previous in result:
-            if previous["store"].identity == store.identity and not paths:
-                raise ValueError("Пользователи не должны использовать одну область памяти.")
-            previous_paths = previous["store"].protected_paths
-            all_pairs = [(workspace, previous["workspace"]),
-                         *[(path, previous["workspace"]) for path in paths],
-                         *[(workspace, path) for path in previous_paths],
-                         *[(left, right) for left in paths for right in previous_paths]]
-            if any(left.is_relative_to(right) or right.is_relative_to(left) for left, right in all_pairs):
-                raise ValueError("Рабочие области и память пользователей пересекаются.")
-        source = load_history_source(item.get("source"), base)
-        sessions = source.list_sessions()
-        selected = item["source"].get("session_ids")
-        projects = item["source"].get("projects")
-        if selected is not None:
-            if not isinstance(selected, list) or any(not isinstance(value, str) for value in selected):
-                raise ValueError("session_ids должен содержать строки.")
-            missing = set(selected) - {session["id"] for session in sessions}
-            if missing:
-                raise ValueError(f"Не найдены сессии: {sorted(missing)}")
-            sessions = [session for session in sessions if session["id"] in selected]
-        if projects is not None:
-            if not isinstance(projects, list) or any(not isinstance(value, str) for value in projects):
-                raise ValueError("projects должен содержать строки.")
-            missing = {value.casefold() for value in projects} - {session.get("project", "").casefold() for session in sessions}
-            if missing:
-                raise ValueError(f"Не найдены проекты: {sorted(missing)}")
-            sessions = [session for session in sessions if session.get("project", "").casefold()
-                        in {value.casefold() for value in projects}]
-        limit = item["source"].get("limit")
-        if limit is not None:
-            if type(limit) is not int or limit < 1:
-                raise ValueError("limit должен быть положительным целым числом.")
-            sessions = sessions[:limit]
-        if len({session["id"] for session in sessions}) != len(sessions):
-            raise ValueError("Источник вернул повторяющиеся идентификаторы сессий.")
-        scenario = None
-        if item.get("replay_scenario"):
-            from command_agent_memory.memory_replay.replay_scenario import load_replay_scenario
-
-            scenario = load_replay_scenario(resolve_path(base, item["replay_scenario"]),
-                                            allow_incomplete=True, allowed_root=base)
-        result.append({"user_id": identity, "workspace": workspace, "target": target,
-                       "layout": layout, "store": store, "source": source, "sessions": sessions,
-                       "source_options": item["source"], "scenario": scenario})
-    return result
-
-
-def validate_team_workspaces(team: dict, base: Path, users: list[dict], *, recover: bool = False) -> list[Path]:
-    """Принимает настройки команды, базовый каталог и пользователей; возвращает получателей.
-
-    Проверяет существование каталогов, ссылки и пересечения до модельных вызовов.
-    Записываемый team_knowledge/ не должен пересекаться с источниками истории,
-    личной памятью, журналами, конфигурацией или командным источником. Файлы не создаёт.
-    При recover=True допускается восстановление прежней публикации получателя.
-    """
-    values = team.get("workspaces", [])
-    if not isinstance(values, list):
-        raise ValueError("team.workspaces должен быть списком каталогов.")
-    protected = [resolve_path(base, team["root"])]
-    for user in users:
-        protected.extend([user["workspace"], *user["store"].protected_paths])
-        source = user["source_options"]
-        if isinstance(source.get("path"), str):
-            protected.append(resolve_path(base, source["path"]))
-    result, targets = [], []
-    for value in values:
-        workspace = resolve_path(base, value)
-        if not workspace.is_dir() or workspace == Path(workspace.anchor):
-            raise ValueError("Нужна существующая рабочая область получателя.")
-        target = checked_path(workspace, "team_knowledge").resolve()
-        if target == base.resolve() or base.resolve().is_relative_to(target):
-            raise ValueError("Копия командной памяти не должна содержать конфигурацию.")
-        if any(target.is_relative_to(path.resolve()) or path.resolve().is_relative_to(target)
-               for path in [*protected, *targets]):
-            raise ValueError("Копия командной памяти пересекается с защищёнными путями.")
-        FileMemoryStore(workspace, ("team_knowledge",)).snapshot(recover=recover)
-        result.append(workspace)
-        targets.append(target)
-    return result
+from command_agent_memory.worker_agents import ReplayFactory
 
 
 def accepted_run(user: dict, fingerprint: str, runtime: StageRuntime) -> Path | None:
@@ -161,104 +42,202 @@ def accepted_run(user: dict, fingerprint: str, runtime: StageRuntime) -> Path | 
     return None
 
 
-def run_pipeline(path: Path, *, validate_only: bool = False, evaluate_by_replay: bool = False) -> None:
-    """Принимает JSON и флаги; выполняет анализ и обновление подключённой памяти.
+def personal_result(user_id: str, state: str, run: Path | None = None,
+                    error: Exception | None = None) -> dict:
+    """Принимает итог участника и путь запуска; возвращает статус и сведения о replay."""
+    result = {"user_id": user_id, "state": state}
+    if error is not None:
+        result["error"] = str(error)
+    if run is None:
+        return result
+    result["run"] = str(run)
+    journal = run / "status.json"
+    try:
+        status = json.loads(journal.read_text(encoding="utf-8"))
+        if not isinstance(status, dict):
+            raise ValueError("Нужен объект JSON.")
+    except (OSError, ValueError) as journal_error:
+        if error is None:
+            raise
+        result["journal_error"] = str(journal_error)
+        return result
+    result.update(status_file=str(journal), replay_status=status.get("replay_status"),
+                  replay_choice=status.get("replay_choice"))
+    if state == "completed":
+        result["state"] = status["state"]
+    return result
 
-    validate-only читает все выбранные истории без моделей и без создания файлов.
-    Настройки, пожелания и пути фиксируются до запуска первого этапа.
+
+def run_personal(user: dict, runtime: StageRuntime,
+                 evaluate_by_replay: bool) -> tuple[dict, Path | None, Exception | None]:
+    """Принимает участника, модели и режим; возвращает итог, принятый запуск и причину отказа."""
+    user_id, workspace = user["user_id"], user["workspace"]
+    run = None
+    try:
+        workspace.mkdir(parents=True, exist_ok=True)
+        with memory_lock(workspace):
+            reports = analyze_source(user, runtime)
+            if not reports.is_dir():
+                return personal_result(user_id, "no_sessions"), None, None
+            fingerprint = report_fingerprint(reports)
+            prior = None if evaluate_by_replay else accepted_run(user, fingerprint, runtime)
+            if prior is not None:
+                return personal_result(user_id, "reused", prior), prior, None
+            context, procedures, _ = read_reports(reports, user_id=user_id)
+            run = create_run_directory(workspace / "consolidation-runs") / "personal"
+            consolidate_with_review(
+                user["target"], "personal", context, get_skill_path("personal-memory-consolidation"),
+                "", "configured", run, knowledge_materials=procedures, user_id=user_id,
+                replay_requested=evaluate_by_replay, replay_scenario=user["scenario"] if evaluate_by_replay else None,
+                replay_context=reports, layout=user["layout"], runtime=runtime, store=user["store"],
+            )
+            return personal_result(user_id, "completed", run), run, None
+    except Exception as error:
+        state = "rejected" if isinstance(error, MemoryRejected) else "failed"
+        return personal_result(user_id, state, run, error), None, error
+
+
+def run_local_team(team_root: Path, workspaces: list[Path], accepted: list[Path],
+                   runtime: StageRuntime, result: dict) -> None:
+    """Принимает команду, получателей и принятые запуски; обновляет итог и доставляет память."""
+    from command_agent_memory.memory_update.team_memory_update import consolidate_team_memory
+    from command_agent_memory.memory_storage.memory_snapshots import read_memory
+
+    if not accepted:
+        result["state"] = "skipped"
+        return
+    team_runs = accepted[0].parents[2] / "team-runs"
+    current = {name: hashlib.sha256(value).hexdigest()
+               for name, value in read_memory(team_root, "knowledge").items()}
+    for status_path in sorted(team_runs.glob("*/knowledge/status.json"), reverse=True):
+        state = json.loads(status_path.read_text(encoding="utf-8"))
+        if (state.get("state") in ("published", "unchanged") and state.get("target") == str(team_root.resolve())
+                and state.get("accepted_runs") == [str(value.resolve()) for value in accepted]
+                and state.get("snapshot_sha256") == current
+                and state.get("configuration_sha256") == runtime.fingerprint()):
+            result.update(state="reused", status_file=str(status_path))
+            break
+    else:
+        run = create_run_directory(team_runs) / "knowledge"
+        result["status_file"] = str(run / "status.json")
+        state = consolidate_team_memory(team_root, accepted, run, "", "configured", runtime.runner("team"),
+                                        configured=True, configuration_sha256=runtime.fingerprint(), runtime=runtime)
+        runtime.save(run / "configuration")
+        result["state"] = state["state"]
+    result["deliveries"] = []
+    for workspace in workspaces:
+        delivery_run = create_run_directory(team_runs) / "delivery"
+        sync_team_memory(team_root, workspace, delivery_run)
+        result["deliveries"].append(str(delivery_run / "status.json"))
+        print(f"Командная память подключена: {workspace / 'team_knowledge'}; журнал: {delivery_run}")
+
+
+def run_pipeline(path: Path, *, validate_only: bool = False, evaluate_by_replay: bool = False,
+                 team_mode: str | None = None, raise_on_failure: bool = True,
+                 configuration: dict | None = None, replay_factory: ReplayFactory | None = None) -> dict:
+    """Принимает JSON и режим; возвращает результаты участников и командного этапа.
+
+    Валидация проверяет входы до записи памяти. При ошибке отдельного цикла
+    остальные участники продолжают работу. raise_on_failure сохраняет прежний
+    способ сообщать ошибку через исключение после завершения остальных этапов.
+    configuration позволяет передать готовые настройки. Относительные пути
+    по-прежнему отсчитываются от родительского каталога path.
+    replay_factory(workspace, layout) создаёт рабочую сессию и включает обязательный replay.
     """
+    if team_mode not in (None, "process", "sync", "status"):
+        raise ValueError("team_mode должен быть process, sync, status или None.")
+    if team_mode is not None and evaluate_by_replay:
+        raise ValueError("Режим Git-команды несовместим с реплеем личной памяти.")
+    if replay_factory is not None and (not callable(replay_factory) or not evaluate_by_replay):
+        raise ValueError("replay_factory требует режима диалоговой проверки.")
     path = path.absolute()
-    configuration = read_configuration(path)
+    if configuration is None:
+        configuration = read_configuration(path, team_only=team_mode is not None)
+    else:
+        configuration = validate_configuration(configuration, team_only=team_mode is not None)
     extensions = configuration.get("extensions", [])
     if not isinstance(extensions, list) or any(not isinstance(name, str) or not name for name in extensions):
         raise ValueError("extensions должен содержать имена Python-модулей.")
     for name in extensions:
         importlib.import_module(name)
-    runtime = StageRuntime(configuration, path.parent)
-    users = validate_users(configuration, path.parent, recover=not validate_only)
-    stages = {"context", "procedures", "review"}
-    if any(user["layout"].personal for user in users):
-        stages.add("consolidation")
-    if any(user["layout"].knowledge for user in users):
-        stages.add("knowledge")
-    if evaluate_by_replay:
-        stages.update({"replay_tester", "evaluation"})
+    runtime = StageRuntime(configuration, path.parent, replay_factory=replay_factory)
+    users = [] if team_mode == "status" else validate_users(configuration, path.parent, recover=not validate_only)
+    stages = set()
+    if not team_mode:
+        stages.update({"context", "procedures", "review"})
+        if any(user["layout"].personal for user in users):
+            stages.add("consolidation")
+        if any(user["layout"].knowledge for user in users):
+            stages.add("knowledge")
+        if evaluate_by_replay:
+            stages.update({"replay_tester", "evaluation"})
     team = configuration.get("team")
-    if team is not None:
-        if not isinstance(team, dict) or "root" not in team or set(team) - {"root", "workspaces"}:
-            raise ValueError("team должен содержать root и необязательный workspaces.")
-        team_root = resolve_path(path.parent, team["root"])
-        if team_root == Path(team_root.anchor):
-            raise ValueError("Корень файловой системы нельзя использовать как командную память.")
-        for user in users:
-            protected = [user["workspace"], *user["store"].protected_paths]
-            if any(team_root.is_relative_to(value) or value.is_relative_to(team_root) for value in protected):
-                raise ValueError("Командная память пересекается с журналами или личной памятью.")
-        team_workspaces = validate_team_workspaces(team, path.parent, users, recover=not validate_only)
+    git_team, team_root, team_workspaces = team_connection(team, path.parent, users, recover=not validate_only)
+    if team_mode == "process" or team_root is not None:
         stages.add("team")
+    if team_mode and git_team is None:
+        raise ValueError("Командные режимы process и sync требуют team.type=git.")
     runtime.validate(stages, load_providers=not validate_only)
     if evaluate_by_replay:
         from command_agent_memory.memory_replay.replay_scenario import check_replay_data
         from command_agent_memory.worker_agents import validate_agent_spec
 
         for user in users:
-            if check_replay_data(user["scenario"])["decision"] == "run":
+            assessment = check_replay_data(user["scenario"])
+            if assessment["decision"] != "run":
+                raise ValueError(f"Replay для {user['user_id']}: {assessment['summary']}.")
+            if replay_factory is None:
                 validate_agent_spec(user["scenario"].agent)
+    result = {"state": "completed", "users": [], "team": None}
     if validate_only:
+        result["state"] = "validated"
+        if git_team:
+            result["team"] = {"state": "validated", "mode": team_mode or "contribute"}
         for user in users:
+            count_sessions = 0
             for session in user["sessions"]:
                 count = sum(1 for _ in user["source"].iter_events(session))
                 if not count:
                     raise ValueError(f"Пустая сессия {session['id']}")
                 print(f"{user['user_id']} / {session['id']}: событий {count}")
+                count_sessions += 1
+            result["users"].append({"user_id": user["user_id"], "state": "validated", "sessions": count_sessions})
         print("Подключения проверены; модели не вызывались, файлы не создавались.")
-        return
-    accepted = []
-    for user in users:
-        user["workspace"].mkdir(parents=True, exist_ok=True)
-        with memory_lock(user["workspace"]):
-            reports = analyze_source(user, runtime)
-            if not reports.is_dir():
-                print(f"Нет сессий для {user['user_id']}.")
-                continue
-            fingerprint = report_fingerprint(reports)
-            prior = None if evaluate_by_replay else accepted_run(user, fingerprint, runtime)
-            if prior is not None:
-                accepted.append(prior)
-                print(f"Память уже принята: {prior}")
-                continue
-            context, procedures, _ = read_reports(reports, user_id=user["user_id"])
-            run = create_run_directory(user["workspace"] / "consolidation-runs") / "personal"
-            consolidate_with_review(user["target"], "personal", context,
-                                    get_skill_path("personal-memory-consolidation"),
-                                    "", "configured", run, knowledge_materials=procedures,
-                                    user_id=user["user_id"], replay_requested=evaluate_by_replay,
-                                    replay_scenario=user["scenario"] if evaluate_by_replay else None,
-                                    replay_context=reports, layout=user["layout"], runtime=runtime,
-                                    store=user["store"])
-            accepted.append(run)
-            print(f"Память обновлена: {user['store'].identity}; журнал: {run}")
-    if team is not None and accepted:
-        from command_agent_memory.memory_update.team_memory_update import consolidate_team_memory
-        from command_agent_memory.memory_storage.memory_snapshots import read_memory
+        return result
+    accepted, failures = [], []
+    if not team_mode:
+        for user in users:
+            status, run, error = run_personal(user, runtime, evaluate_by_replay)
+            result["users"].append(status)
+            if run is not None:
+                accepted.append(run)
+            if error is not None:
+                failures.append(error)
+            details = status.get("error") or status.get("run", "")
+            print(f"{user['user_id']}: {status['state']} {details}".rstrip())
+    if team is not None:
+        result["team"] = {}
+        try:
+            if git_team is not None:
+                from command_agent_memory.team_memory_delivery.git_team import run_git_team
 
-        team_runs = users[0]["workspace"] / "team-runs"
-        current = {name: hashlib.sha256(value).hexdigest()
-                   for name, value in read_memory(team_root, "knowledge").items()}
-        for status_path in sorted(team_runs.glob("*/knowledge/status.json"), reverse=True):
-            state = json.loads(status_path.read_text(encoding="utf-8"))
-            if (state.get("state") in ("published", "unchanged") and state.get("target") == str(team_root.resolve())
-                    and state.get("accepted_runs") == [str(value.resolve()) for value in accepted]
-                    and state.get("snapshot_sha256") == current
-                    and state.get("configuration_sha256") == runtime.fingerprint()):
-                print(f"Командная память уже принята: {team_root}")
-                break
-        else:
-            run = create_run_directory(team_runs) / "knowledge"
-            consolidate_team_memory(team_root, accepted, run, "", "configured", runtime.runner("team"),
-                                    configured=True, configuration_sha256=runtime.fingerprint(), runtime=runtime)
-            runtime.save(run / "configuration")
-        for workspace in team_workspaces:
-            delivery_run = create_run_directory(team_runs) / "delivery"
-            sync_team_memory(team_root, workspace, delivery_run)
-            print(f"Командная память подключена: {workspace / 'team_knowledge'}; журнал: {delivery_run}")
+                from command_agent_memory.memory_update.team_memory_update import git_team_proposer
+
+                propose = git_team_proposer(runtime) if team_mode == "process" else None
+                run_git_team(git_team, team_mode or "contribute", accepted, team_workspaces,
+                             result["team"], propose=propose)
+            else:
+                run_local_team(team_root, team_workspaces, accepted, runtime, result["team"])
+        except Exception as error:
+            from command_agent_memory.memory_update.team_memory_update import TeamMemoryRejected
+
+            failures.append(error)
+            team_state = "rejected" if isinstance(error, TeamMemoryRejected) else "failed"
+            result["team"].update(state=team_state, error=str(error))
+        if git_team is not None:
+            print(f"Командная память: {result['team']['state']}.")
+    if failures:
+        result["state"] = "failed"
+        if raise_on_failure:
+            raise failures[0]
+    return result

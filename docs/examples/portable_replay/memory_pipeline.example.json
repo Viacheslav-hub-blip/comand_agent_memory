@@ -1,0 +1,50 @@
+{
+  "defaults": {
+    "provider": "openrouter",
+    "model": "deepseek/deepseek-v4.1-flash-1017"
+  },
+  "stages": {
+    "context": {
+      "timeout_seconds": 150,
+      "max_model_calls": 10
+    },
+    "procedures": {
+      "timeout_seconds": 150,
+      "max_model_calls": 10
+    },
+    "consolidation": {
+      "timeout_seconds": 150,
+      "max_model_calls": 10
+    },
+    "review": {
+      "timeout_seconds": 150,
+      "max_model_calls": 10
+    },
+    "replay_tester": {
+      "timeout_seconds": 150,
+      "max_model_calls": 10
+    },
+    "evaluation": {
+      "timeout_seconds": 150,
+      "max_model_calls": 10
+    }
+  },
+  "users": [
+    {
+      "user_id": "demo",
+      "workspace": "runs",
+      "source": {
+        "type": "jsonl",
+        "path": "history.jsonl"
+      },
+      "memory": {
+        "type": "files",
+        "root": "memory",
+        "personal": [
+          "AGENTS.md"
+        ]
+      },
+      "replay_scenario": "scenario.json"
+    }
+  ]
+}

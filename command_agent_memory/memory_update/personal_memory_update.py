@@ -1,5 +1,6 @@
 """Полный цикл обновления памяти одного человека: подготовка, ревью, replay, публикация.
 
+Класс MemoryRejected обозначает отказ ревью или replay.
 Функция consolidate_with_review принимает выбранную память, материалы, модели
 и журнал; публикует только принятый результат, сохраняя статусы и снимки.
 """
@@ -23,6 +24,10 @@ if TYPE_CHECKING:
     from command_agent_memory.memory_storage.storage_registry import MemoryStore
 
 
+class MemoryRejected(RuntimeError):
+    """Принимает причину отказа. Действующая память сохраняется."""
+
+
 def consolidate_with_review(target: Path, stage: str, materials: str, instructions_path: Path,
                             executable: str, model: str, run: Path,
                             review_model: str | None = None,
@@ -38,8 +43,8 @@ def consolidate_with_review(target: Path, stage: str, materials: str, instructio
     Личный этап готовит правила, контекст и knowledge в одной копии. Блокировка
     удерживается от чтения до переноса; отказ и сбой сохраняют исходную память.
     replay_requested или replay_scenario включает проверку наличия данных.
-    При нехватке данных перенос разрешает ревью; иначе выполняется диалог и
-    требуется candidate. user_id задаёт владельца принятого снимка. Отчёты
+    При запрошенном replay публикация требует полного сценария и выбора
+    candidate. user_id задаёт владельца принятого снимка. Отчёты
     и хеши версии сохраняются в run/report/ и status.json.
     layout разрешает настроенные пути внешнего агента; runtime маршрутизирует
     модельные этапы и сохраняет снимок настроек и пожеланий.
@@ -110,7 +115,7 @@ def consolidate_with_review(target: Path, stage: str, materials: str, instructio
             status["reviews"] = decision["reviews"]
             if decision["decision"] != "accepted":
                 status.update(state="rejected", review=decision["review"])
-                raise RuntimeError(f"Память не обновлена: {decision['summary']} См. {decision['review']}")
+                raise MemoryRejected(f"Память не обновлена: {decision['summary']} См. {decision['review']}")
             if replay_enabled:
                 from command_agent_memory.memory_replay.replay_scenario import check_replay_data
                 from command_agent_memory.memory_replay.replay_evaluation import evaluate_by_replay
@@ -124,35 +129,34 @@ def consolidate_with_review(target: Path, stage: str, materials: str, instructio
                 write_stage_report(run, "replay-assessment", "Наличие данных для диалога", "completed",
                                    assessment["summary"], links={"Проверка данных": decision_path})
                 if assessment["decision"] == "skip":
-                    status.update(replay_status="skipped", replay_reason=assessment["summary"])
-                    write_stage_report(run, "replay", "Проверка решением задачи", "skipped",
-                                       assessment["summary"] + "\n\nПрогон не выполнен. Принятие памяти основано на ревью.")
-                else:
-                    if replay_scenario is None:
-                        raise RuntimeError("Для диалогового прогона не предоставлен сценарий.")
-                    status.update(replay_status="running", replay=str(run / "replay"))
-                    write_stage_report(run, "replay", "Проверка решением задачи", "running", "Выполняются два прогона штатного агента.")
-                    try:
-                        evaluation_arguments = (
-                            proposal, replay_scenario, executable, review_model or model,
-                            user_id,
-                        )
-                        evaluation = (evaluate_by_replay(
-                            *evaluation_arguments, runner=runner,
-                            **({"runtime": runtime} if runtime is not None else {}),
-                        ) if custom_runner is not None or runtime is not None else evaluate_by_replay(
-                            *evaluation_arguments,
-                        ))
-                    except BaseException:
-                        status["replay_status"] = "failed"
-                        raise
-                    status.update(replay_status="completed", replay_choice=evaluation["choice"])
-                    write_stage_report(run, "replay", "Проверка решением задачи", "completed",
-                                       f"Выбор: {evaluation['choice']}\n\n{evaluation['summary']}",
-                                       links={"Сравнение": run / "replay/decision.json", "Результат": run / "replay/result"})
-                    if evaluation["choice"] != "candidate":
-                        status["state"] = "rejected"
-                        raise RuntimeError(f"Память не обновлена после прогона: {evaluation['summary']}")
+                    status.update(replay_status="failed", replay_reason=assessment["summary"])
+                    write_stage_report(run, "replay", "Проверка решением задачи", "failed", assessment["summary"])
+                    raise RuntimeError(assessment["summary"])
+                if replay_scenario is None:
+                    raise RuntimeError("Для диалогового прогона не предоставлен сценарий.")
+                status.update(replay_status="running", replay=str(run / "replay"))
+                write_stage_report(run, "replay", "Проверка решением задачи", "running", "Выполняются два прогона штатного агента.")
+                try:
+                    evaluation_arguments = (
+                        proposal, replay_scenario, executable, review_model or model,
+                        user_id,
+                    )
+                    evaluation = (evaluate_by_replay(
+                        *evaluation_arguments, runner=runner,
+                        **({"runtime": runtime} if runtime is not None else {}),
+                    ) if custom_runner is not None or runtime is not None else evaluate_by_replay(
+                        *evaluation_arguments,
+                    ))
+                except BaseException:
+                    status["replay_status"] = "failed"
+                    raise
+                status.update(replay_status="completed", replay_choice=evaluation["choice"])
+                write_stage_report(run, "replay", "Проверка решением задачи", "completed",
+                                   f"Выбор: {evaluation['choice']}\n\n{evaluation['summary']}",
+                                   links={"Сравнение": run / "replay/decision.json", "Результат": run / "replay/result"})
+                if evaluation["choice"] != "candidate":
+                    status["state"] = "rejected"
+                    raise MemoryRejected(f"Память не обновлена после прогона: {evaluation['summary']}")
             else:
                 write_stage_report(run, "replay", "Проверка решением задачи", "not_requested",
                                    "Проверка не запрошена. Принятие памяти основано на ревью.")

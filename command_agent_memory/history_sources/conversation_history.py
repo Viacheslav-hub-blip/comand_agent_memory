@@ -298,7 +298,7 @@ class GigaAgentSource(RecordSource):
         while True:
             body = {"limit": 100}
             if before:
-                body["before"] = before
+                body["before"] = {"configurable": before}
             page = request_json(self.options["url"], route, token_env=self.options.get("token_env"), body=body)
             if not isinstance(page, list):
                 raise ValueError("LangGraph history должен возвращать список ThreadState.")

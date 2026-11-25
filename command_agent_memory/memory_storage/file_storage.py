@@ -86,15 +86,19 @@ class FileMemoryStore:
         return result
 
     @contextmanager
-    def read_session(self, *, recover: bool = True) -> Iterator[dict[str, bytes]]:
+    def read_session(self, *, recover: bool = True, verify_unchanged: bool = False) -> Iterator[dict[str, bytes]]:
         """Принимает разрешение восстановления; выдаёт снимок, удерживая блокировку до выхода.
 
         Обёртка рабочего агента может удерживать этот контекст на протяжении задачи:
         новые публикации получат отказ, а незавершённый перенос восстановится до старта.
+        verify_unchanged сверяет файлы после успешного выхода из задачи.
         """
         with memory_lock('publication:' + self.identity):
             recover_transaction(self, allow_write=recover)
-            yield self._snapshot()
+            before = self._snapshot()
+            yield before.copy() if verify_unchanged else before
+            if verify_unchanged and self._snapshot() != before:
+                raise RuntimeError("Файлы памяти изменились во время чтения.")
 
     def snapshot(self, *, recover: bool = True) -> dict[str, bytes]:
         """Принимает разрешение восстановления; возвращает согласованный снимок либо ошибку.

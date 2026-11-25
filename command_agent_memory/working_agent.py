@@ -1,8 +1,10 @@
 """Штатная сборка локального DeepAgents-агента для работы и replay.
 
 Функции: create_agent возвращает рабочий граф; create_session собирает тот же граф
-с профилем модели, инструментов и среды; tool_profile описывает фактические инструменты.
+с профилем модели, инструментов и среды; create_team_session удерживает снимок команды;
+tool_profile описывает фактические инструменты.
 """
+from contextlib import contextmanager
 import hashlib
 from importlib.metadata import version
 import inspect
@@ -132,3 +134,28 @@ def create_agent(workspace: Path, *, model_name: str | None = None, memory_enabl
         options["system_prompt"] = system_prompt
     return create_session(workspace, options, memory_layout, tools=tools,
                           read_only_paths=read_only_paths, memory_enabled=memory_enabled).agent
+
+
+@contextmanager
+def create_team_session(workspace: Path, options: dict,
+                        memory_layout: MemoryLayout | None = None, *, tools: list | None = None):
+    """Принимает рабочий каталог и настройки; выдаёт штатную сессию и SHA командного снимка.
+
+    Штатные файловые инструменты читают командные знания. Сессия и блокировка
+    действуют до выхода из контекста. Без Git-версии SHA равен None.
+    """
+    from command_agent_memory.team_memory_delivery.git_team import read_team_version
+
+    with read_team_version(workspace) as commit:
+        team_directory = Path("team_knowledge")
+        if memory_layout is not None and not any(
+            Path(entry).is_relative_to(team_directory) or team_directory.is_relative_to(Path(entry))
+            for entry in memory_layout.entries
+        ):
+            memory_layout = MemoryLayout(memory_layout.personal, (*memory_layout.knowledge, team_directory.as_posix()))
+        session = create_session(workspace, options, memory_layout, tools=tools,
+                                 read_only_paths=("/team_knowledge",))
+        try:
+            yield session, commit
+        finally:
+            session.close()

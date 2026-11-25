@@ -1,7 +1,8 @@
 """Настройки экземпляра приложения и разрешение пользовательских путей.
 
 Функции: read_local_settings — старые локальные настройки; resolve_path — путь;
-read_configuration — чтение JSON. StageSettings хранит параметры модели этапа.
+read_configuration — чтение JSON; validate_configuration — проверка структуры.
+StageSettings хранит параметры модели этапа.
 """
 from dataclasses import dataclass
 import json
@@ -33,13 +34,21 @@ def resolve_path(base: Path, value: str) -> Path:
     return Path(os.path.abspath(base / Path(value).expanduser()))
 
 
-def read_configuration(path: Path) -> dict:
-    """Принимает путь JSON; возвращает объект конфигурации, отклоняя неизвестные поля."""
-    value = json.loads(path.read_text(encoding="utf-8-sig"))
+def read_configuration(path: Path, *, team_only: bool = False) -> dict:
+    """Принимает путь JSON и режим; возвращает проверенный объект конфигурации.
+
+    team_only разрешает опустить users для командных команд.
+    """
+    return validate_configuration(json.loads(path.read_text(encoding="utf-8-sig")), team_only=team_only)
+
+
+def validate_configuration(value: object, *, team_only: bool = False) -> dict:
+    """Принимает подготовленную конфигурацию и режим; возвращает проверенную копию словаря."""
     allowed = {"defaults", "stages", "wishes_file", "users", "team", "extensions"}
     if not isinstance(value, dict) or set(value) - allowed:
         raise ValueError("Неизвестные поля конфигурации подключения.")
-    if not isinstance(value.get("users"), list) or not value["users"]:
+    value = {"users": [], **value} if team_only else dict(value)
+    if not isinstance(value.get("users"), list) or (not team_only and not value["users"]):
         raise ValueError("Нужен непустой список users.")
     return value
 

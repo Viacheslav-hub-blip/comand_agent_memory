@@ -13,6 +13,7 @@ from command_agent_memory.application_config import STAGES, StageSettings, resol
 from command_agent_memory.model_execution.provider_registry import load_model_adapter
 from command_agent_memory.model_execution.execution_policy import execution_policy
 from command_agent_memory.skill_resources import skill_fingerprints
+from command_agent_memory.worker_agents import ReplayFactory
 
 
 def build_prompt(prompt: str, wishes: str) -> str:
@@ -29,8 +30,8 @@ class StageRuntime:
     первого запроса; runner возвращает исполнитель этапа с контрактом Runner.
     """
 
-    def __init__(self, configuration: dict, base: Path):
-        """Принимает настройки; читает пожелания один раз, создаёт проверенные параметры."""
+    def __init__(self, configuration: dict, base: Path, *, replay_factory: ReplayFactory | None = None):
+        """Принимает настройки и необязательную фабрику replay; сохраняет параметры выполнения."""
         defaults = configuration.get("defaults", {})
         stages = configuration.get("stages", {})
         if isinstance(stages, dict) and "replay_agent" in stages:
@@ -39,6 +40,7 @@ class StageRuntime:
         if not isinstance(defaults, dict) or not isinstance(stages, dict) or set(stages) - STAGES:
             raise ValueError("Некорректные defaults или имена stages.")
         self.settings = {}
+        self.replay_factory = replay_factory
         self.adapters = {}
         self.skills = skill_fingerprints()
         self.wishes = ""
@@ -117,15 +119,17 @@ class StageRuntime:
             ensure_ascii=False, indent=2), encoding="utf-8")
 
     def run(self, stage: str, prompt: str, cwd: Path, prefix: Path,
-            *, agent: bool = False, writable: bool = False) -> str:
-        """Принимает этап, задание и пути; вызывает его модель и возвращает текст ответа."""
+            *, agent: bool = True, writable: bool = False) -> str:
+        """Принимает этап, задание и пути; возвращает результат агентного сеанса с инструментами."""
+        if not agent:
+            raise ValueError("Для модельного этапа требуется агентный исполнитель с инструментами.")
         setting = self.settings[stage]
         adapter = self.adapter(stage)
         prefix.parent.mkdir(parents=True, exist_ok=True)
         prefix.with_suffix(".stage.json").write_text(json.dumps(
-            {"stage": stage, **asdict(setting), "configuration_sha256": self.fingerprint()},
+            {"stage": stage, "execution": "agent", **asdict(setting), "configuration_sha256": self.fingerprint()},
             ensure_ascii=False, indent=2), encoding="utf-8")
-        runner = adapter.agent_runner if agent else adapter.chat_runner
+        runner = adapter.agent_runner
         budgets = {key: value for key, value in {"timeout_seconds": setting.timeout_seconds,
                                                 "max_model_calls": setting.max_model_calls}.items()
                    if value is not None}

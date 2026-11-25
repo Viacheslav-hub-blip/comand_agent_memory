@@ -185,7 +185,9 @@ def evaluate_by_replay(proposal: MemoryProposal, scenario: ReplayScenario,
         raise ValueError("Для выполнения прогона нужен запрос, inputs и reference.")
     if not scenario.messages:
         raise ValueError("Для диалогового прогона нужны отдельные messages либо dialogue_source.")
-    validate_agent_spec(scenario.agent)
+    factory = getattr(runtime, "replay_factory", None)
+    if factory is None:
+        validate_agent_spec(scenario.agent)
     directory = proposal.run / "replay"
     directory.mkdir()
     baseline_workspace = directory / "baseline/workspace"
@@ -205,9 +207,11 @@ def evaluate_by_replay(proposal: MemoryProposal, scenario: ReplayScenario,
     started = perf_counter()
     try:
         with ExitStack() as resources:
-            baseline_session = load_worker_session(scenario.agent, baseline_workspace, proposal.layout)
+            baseline_session = (factory(baseline_workspace, proposal.layout) if factory is not None else
+                                load_worker_session(scenario.agent, baseline_workspace, proposal.layout))
             resources.callback(baseline_session.close)
-            candidate_session = load_worker_session(scenario.agent, workspace, proposal.layout)
+            candidate_session = (factory(workspace, proposal.layout) if factory is not None else
+                                 load_worker_session(scenario.agent, workspace, proposal.layout))
             resources.callback(candidate_session.close)
             fingerprint = require_same_profile(baseline_session, candidate_session)
             (directory / "agent-profile.json").write_text(json.dumps(

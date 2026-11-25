@@ -162,8 +162,8 @@ def _run_openrouter(_runtime: str, model: str, prompt: str, cwd: Path,
     """Принимает совместимые параметры исполнителя; возвращает последний ответ агента.
 
     Первый параметр сохранён для единого интерфейса с Codex и не используется.
-    Модель вызывается напрямую через OpenRouter. Агент получает файловые и shell
-    инструменты в cwd. При writable=False промпт запрещает изменения файлов.
+    Агент получает файловые инструменты. Читающие этапы и этапы с ограниченной
+    областью записи работают без shell. Прочие пишущие этапы получают локальный shell.
     Доступные сообщения и usage сохраняются даже при сбое.
     """
     validate_openrouter()
@@ -194,8 +194,8 @@ def _run_openrouter(_runtime: str, model: str, prompt: str, cwd: Path,
         max_retries=OPENROUTER_MAX_RETRIES,
     )
     policy = current_execution_policy()
-    if policy.write_paths is not None:
-        backend = ScopedFilesystemBackend(cwd, policy.write_paths if writable else ())
+    if not writable or policy.write_paths is not None:
+        backend = ScopedFilesystemBackend(cwd, (policy.write_paths or ()) if writable else ())
         environment = describe_execution_environment(cwd, file_paths="scoped", shell=False)
     else:
         backend = RobustLocalShellBackend(root_dir=cwd, virtual_mode=False, inherit_env=True)
@@ -210,7 +210,8 @@ def _run_openrouter(_runtime: str, model: str, prompt: str, cwd: Path,
         system_prompt=(
             environment + "\n\n" +
             "Выполни одну переданную задачу. Не создавай подзадачи и не делегируй работу. "
-            + ("Используй тексты, уже включённые в запрос. Дополнительные файлы открывай "
+            + ("Прочитай указанные входные файлы и верни результат в ответе. " if not writable else
+               "Используй тексты, уже включённые в запрос. Дополнительные файлы открывай "
                "только для конкретного вопроса или точечной правки. "
                if policy.write_paths is not None else
                "Сразу прочитай указанные файлы, внеси требуемые изменения и проверь их. ")

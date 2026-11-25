@@ -2,6 +2,7 @@
 
 create_agent импортируется из working_agent и используется также в обычном запуске.
 Функции: open_chat_database подготавливает SQLite; save_message сохраняет сообщение;
+save_message_record сохраняет сериализованное сообщение;
 run_turn выполняет ход в существующей сессии и выдаёт сообщения с инструментальными результатами.
 """
 from datetime import datetime, timezone
@@ -45,13 +46,20 @@ def save_message(connection: sqlite3.Connection, session_id: str, user_id: str,
     """
     from langchain_core.messages import message_to_dict
 
-    content = message.content if isinstance(message.content, str) else json.dumps(message.content, ensure_ascii=False)
+    save_message_record(connection, session_id, user_id, message_to_dict(message))
+
+
+def save_message_record(connection: sqlite3.Connection, session_id: str, user_id: str, record: dict) -> None:
+    """Принимает соединение, ID диалога и сериализованное сообщение; сохраняет запись SQLite."""
+    content = record["data"]["content"]
+    if not isinstance(content, str):
+        content = json.dumps(content, ensure_ascii=False)
     connection.execute(
         "INSERT INTO messages (session_id, user_id, created_at, role, content, message_json) "
         "VALUES (?, ?, ?, ?, ?, ?)",
         (session_id, str(user_id), datetime.now(timezone.utc).isoformat(),
-         "user" if message.type == "human" else message.type, content,
-         json.dumps(message_to_dict(message), ensure_ascii=False)),
+         "user" if record["type"] == "human" else record["type"], content,
+         json.dumps(record, ensure_ascii=False)),
     )
     connection.commit()
 

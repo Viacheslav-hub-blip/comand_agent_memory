@@ -65,14 +65,14 @@ def source_evidence(sources: list[tuple[Path, dict, dict[str, bytes]]]) -> dict:
             json.dumps(value, sort_keys=True) for value in metadata.get("analysis_sessions", []))]
         for name, content in sorted(files.items()):
             source = {"user_id": metadata["user_id"],
-                      "memory_identity": metadata.get("memory_store_identity", metadata["target"]),
+                      "memory_identity": metadata.get("memory_store_identity") or metadata["target"],
                       "sessions": sessions, "document": name,
                       "sha256": hashlib.sha256(content).hexdigest()}
             identifier = "source-" + hashlib.sha256(json.dumps(
                 source, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
             source["independence"] = "not_established"
             source["content_base64"] = base64.b64encode(content).decode("ascii")
-            source["acceptances"] = [{"run": str(run), "replay_status": metadata["replay_status"],
+            source["acceptances"] = [{"run": metadata.get("contribution_id", str(run)), "replay_status": metadata["replay_status"],
                                       "replay_choice": metadata.get("replay_choice")}]
             if identifier in evidence:
                 source["acceptances"] = evidence[identifier]["acceptances"] + source["acceptances"]

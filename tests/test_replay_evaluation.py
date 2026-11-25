@@ -339,19 +339,22 @@ class ReplayEvaluationTests(unittest.TestCase):
             scenarios.load_replay_scenario(scenario)
 
 
-    def test_missing_scenario_is_accepted_by_review(self):
-        """Проверяет принятие по review без данных; возвращает None."""
-        self.execute(scenario_missing=True)
+    def test_requested_replay_requires_scenario(self):
+        """Без входов проверяет остановку до публикации при явно запрошенном replay."""
+        with self.assertRaisesRegex(RuntimeError, "сценарий"):
+            self.execute(scenario_missing=True)
         self.assertEqual((self.worker_calls, self.judge_calls), (0, 0))
         status = json.loads((self.run / "status.json").read_text(encoding="utf-8"))
-        self.assertEqual(status["replay_status"], "skipped")
+        self.assertEqual(status["replay_status"], "failed")
         self.assertNotIn("replay_choice", status)
-        self.assertEqual(read_memory(self.target, "personal"), self.after)
+        self.assertEqual(read_memory(self.target, "personal"), self.before)
 
-    def test_request_without_dialogue_messages_skips(self):
-        """Проверяет, что одношаговый сценарий не запускается как диалог; возвращает None."""
+    def test_requested_replay_without_messages_stops_publication(self):
+        """Без входов проверяет остановку публикации при отсутствии исходных реплик."""
         self.scenario = scenarios.ReplayScenario("Запрос", self.inputs, self.reference)
-        self.execute()
+        with self.assertRaisesRegex(RuntimeError, "реплик"):
+            self.execute()
+        self.assertEqual(read_memory(self.target, "personal"), self.before)
         self.assertEqual(self.worker_calls, 0)
         assessment = json.loads((self.run / "replay-assessment/decision.json").read_text(encoding="utf-8"))
         self.assertEqual(assessment["decision"], "skip")
