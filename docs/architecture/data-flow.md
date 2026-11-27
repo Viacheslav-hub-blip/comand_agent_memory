@@ -10,6 +10,8 @@ flowchart TD
     Host["Журналы клиента · JSONL · SQL · API"]
     Setup["Поиск или указанный путь<br/>agent-memory-setup"]
     Settings["Проверенное подключение<br/>memory_pipeline.json"]
+    Check{"Входы запрошенного режима полны?"}
+    Stop["Остановка до вызова моделей"]
     Events["События выбранной сессии<br/>HistoryEvent → JSONL"]
     Context["context-analysis<br/>правила и определения"]
     Procedures["procedure-analysis<br/>случаи и процедуры"]
@@ -22,14 +24,15 @@ flowchart TD
     Keep["Действующая память сохраняется"]
     Store["Запись через MemoryStore<br/>файлы или SQLite"]
     Status["status.json · отчёты и хеши"]
-    Host --> Setup --> Settings --> Events
+    Host --> Setup --> Settings --> Check
+    Check -->|Да| Events
+    Check -->|Нет| Stop
     Events --> Context & Procedures
     Context & Procedures & Baseline --> Draft --> Review
     Review -->|Да| After --> Replay
     Review -->|Нет| Keep
     Replay -->|Нет| Store
-    Replay -->|Да, входы полны| Evaluate
-    Replay -->|Да, не хватает входов| Keep
+    Replay -->|Да| Evaluate
     Evaluate -->|Да| Store
     Evaluate -->|Отказ или сбой| Keep
     Store & Keep --> Status

@@ -21,6 +21,9 @@ zstandard = ["zstandard>=0.22,<1"]
 command-agent-memory = "command_agent_memory.__main__:main"
 command-agent-memory-worker = "command_agent_memory.team_worker:main"
 
+[tool.setuptools]
+include-package-data = false
+
 [tool.setuptools.packages.find]
 include = ["command_agent_memory*"]
 namespaces = false
